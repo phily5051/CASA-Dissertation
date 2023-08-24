@@ -1,0 +1,220 @@
+---
+title: "population_hex"
+output: html_document
+date: "2023-07-22"
+---
+
+```{r packages}
+library(sf)
+library(here)
+library(janitor)
+library(dplyr)
+library(tidyverse)
+library(readxl)
+```
+
+```{r memory usage}
+gc()
+```
+## LSOA Population
+
+```{r london boundary}
+# This data is merged in QGIS
+london_boundary <- st_read(here::here("data","lsoa","london_boundary", "london_boundary.shp"))%>% st_transform(27700) %>% clean_names()
+```
+
+
+```{r read in hex data}
+hexagon_grid <- st_read(here::here('data', 'locomizer', 'Greater_London.json')) %>% st_transform(27700)
+```
+
+
+```{r read in lsoa data}
+#------2011 LSOA boundary----------------------------------------------
+# source: https://hub.arcgis.com/datasets/ons::lsoa-dec-2011-boundaries-generalised-clipped-bgc-ew-v3-2/explore
+
+# lsoa boundary
+lsoa_boundary <- st_read(here::here('data', 'lsoa', 'LSOA_Dec_2011_Boundaries_Generalised_Clipped_BGC_EW_V3_-5359576152338500277.geojson'))%>% st_transform(27700)
+
+# lsoa boundary info
+lsoa_boundary_info <- read_csv(here::here('data', 'lsoa', 'lsoa_boundary_info.csv')) %>% 
+  select(LSOA11CD, Shape__Area) %>%
+  clean_names()
+
+# merge lsoa boundary data
+lsoa_boundary <- left_join(lsoa_boundary,
+                             lsoa_boundary_info,
+                             by = c('LSOA11CD' = 'lsoa11cd'), .keep_all = TRUE)
+
+gc()
+
+# clip LSOAs to london boundary
+lsoa_london <- st_intersection(lsoa_boundary, london_boundary) #4969 LSOAs
+
+
+#----LSOA Population-----------------------------------------
+# 2020 lsoa population - this data is based on 2011 lsoa boundaries so you should use 2011 lsoa boundary not 2021 lsoa boundary!
+# source: https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationestimates/datasets/lowersuperoutputareamidyearpopulationestimates
+
+# read in lsoa population data
+pop <- read_excel(here::here('data', 'lsoa', 'sape23dt2mid2020lsoasyoaestimatesunformatted.xlsx'), 
+                       sheet = 'Mid-2020 Persons',
+                       skip = 4) %>% select(c(1,2,5,6,7)) %>%
+  clean_names()
+
+
+
+# join lsoa_pop with lsoa boundary based on LSOA11CD
+lsoa_pop <- lsoa_london %>% 
+  left_join(.,
+            pop,
+            by = c('LSOA11CD' = 'lsoa_code'), .keep_all = T)
+
+
+
+# calculate population density
+lsoa_pop <- lsoa_pop %>%
+  mutate(pop_density = lsoa_pop$all_ages / (lsoa_pop$shape_area/1000000)) 
+
+# select columns of interest
+lsoa_pop <- lsoa_pop %>% select(LSOA11CD, lsoa_name, LSOA11NM, shape_area, all_ages, pop_density)
+
+max(lsoa_pop$pop_density)
+
+# save data
+# file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/lsoa/lsoa_pop.geojson'
+# st_write(lsoa_pop, file_path, driver = 'GeoJSON')
+
+# read in LSOA pop
+lsoa_pop <- st_read(here::here('data', 'lsoa', 'lsoa_pop.geojson')) %>% select(-c(3,4,6)) %>% 
+  st_transform(27700)
+```
+
+## Projecting population data to hexagon
+```{r cumulative sum}
+# Calculate area of each polygon in 'population_gdf'
+lsoa_pop$oa_area <- st_area(lsoa_pop)
+
+# Projecting the population data onto the hexagonal grid
+intersections <- st_intersection(hexagon_grid, lsoa_pop)
+
+# Calculate the ratio of intersection area to original polygon area
+intersections$oa_ratio <- st_area(intersections) / intersections$oa_area
+
+
+# Calculate the population in each intersection and sum by grid index
+intersections$weighted_pop <- intersections$all_ages * intersections$oa_ratio
+
+
+# Group by hexagon grid - weighted average population
+hexagon_pop <- intersections %>%
+  group_by(X_index) %>%
+  summarise(weighted_avg_pop = sum(weighted_pop))
+
+max(hexagon_pop$weighted_avg_pop)
+
+# # save data - just those with populations
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/pop/hexagon_pop_1.geojson'
+st_write(hexagon_pop, file_path, driver = 'GeoJSON')
+
+```
+
+
+# Projecting hexagon-level population to neighbourhood-level
+## Isochrone 500m
+```{r}
+# read in hexagon population data
+hex_pop <- st_read(here::here('data', 'pop', 'hexagon_pop.geojson')) %>% st_transform(27700)
+
+# read in neighbourhood polygon at isochrone of 500m
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+```
+
+
+```{r cumulative population at neighbourhood level}
+# calculate the area size of each neighbourhood
+hex_pop$hex_area <- st_area(hex_pop)
+
+# Perform spatial intersection
+intersection <- st_intersection(hex_pop, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+# Calculate the estimated population within each neighborhood polygon
+intersection$estimated_population <- intersection$weighted_avg_pop * intersection$area_proportion
+
+intersection <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(populations = sum(estimated_population)) 
+
+
+# calculate area size
+intersection <- intersection %>% mutate(area = st_area(.))
+
+# Calculate population density per square kilometer
+intersection <- intersection %>%
+  mutate(pop_density = populations / (area / 1000000))
+                                      
+max(intersection$pop_density)
+min(intersection$pop_density)
+
+# select columns
+intersection <- intersection %>% st_drop_geometry()
+intersection <- intersection %>% select(c(1,4))
+
+# save data - just those with populations
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/pop_density/neighbourhood_500_pop_density_km.csv'
+
+st_write(intersection, file_path)
+```
+
+
+## Isochrone 600m
+```{r}
+# read in hexagon population data
+hex_pop <- st_read(here::here('data', 'pop', 'hexagon_pop.geojson')) %>% st_transform(27700)
+
+# read in neighbourhood polygon at isochrone of 600m
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_600.geojson')) %>% st_transform(27700)
+```
+
+```{r population at neighbourhood level}
+# calculate the area size of each neighbourhood
+hex_pop$hex_area <- st_area(hex_pop)
+
+# Perform spatial intersection
+intersection <- st_intersection(hex_pop, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+# Calculate the estimated population within each neighborhood polygon
+intersection$estimated_population <- intersection$weighted_avg_pop * intersection$area_proportion
+
+intersection <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(populations = sum(estimated_population)) 
+
+max(intersection$populations)
+
+# calculate area size
+intersection <- intersection %>% mutate(area = st_area(.))
+
+# Calculate population density per square kilometer
+intersection <- intersection %>%
+  mutate(pop_density = populations / (area / 1000000))
+                                      
+# max pop density
+max(intersection$pop_density)
+
+# select columns
+intersection <- intersection %>% st_drop_geometry()
+intersection <- intersection %>% select(c(1,4))
+
+# save data - just those with populations
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/pop_density/neighbourhood_600_pop_density_km.csv'
+
+st_write(intersection, file_path)
+
+```

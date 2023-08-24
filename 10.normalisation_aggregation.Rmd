@@ -1,0 +1,343 @@
+---
+title: "normalisation_aggregation"
+output: html_document
+date: "2023-07-29"
+---
+
+# 1. Packages
+
+```{r packages}
+# load libraries
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+```
+
+# 2. Data - 500m
+```{r}
+# read in data
+df <- read.csv(here::here('data', 'final_data', 'final_500.csv'))
+
+diversity <- df[1:6]
+proximity <- df[c(1, 7:11)]
+pop_density <- df[c(1, 12)]
+
+gc()
+```
+
+
+# 3. Normalisation + Aggregation
+## 3.1. Functions
+```{r functions for diversity}
+# exponential transformation function
+# The higher the value is, the higher transformed value it gets.
+# As higher value indicates the better diversity of neighbourhood
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# function to rank and exponentially transform a variable in a given table
+rank_exp <- function(df, var){
+  
+  var <- enquo(var)
+  # select relevant data from df
+  data <- select(df, nb_clus, !! var)
+  # create a ranking, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!! var),
+           rank_s = scales::rescale(rank, to = c(0, 1)),
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+
+
+## 3.2. Implementation of Functions
+### 3.2.1. Diversity
+```{r diversity}
+# exponential transformation on each diversity indicator
+diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+
+# diversity domain score
+diversity <- diversity %>%
+  mutate(diversity_score = (d_c_exp / 5) + (d_edu_exp / 5) +
+           (d_enter_exp / 5) + (d_l_exp / 5) + (d_h_exp / 5))
+
+# Overall diversity exponential transformation
+diversity['diversity_exp'] <- rank_exp(diversity, diversity_score)
+
+# final diversity data
+diversity_final <- diversity %>% select(nb_clus, d_c_exp, d_edu_exp,
+                                        d_enter_exp, d_l_exp,
+                                        d_h_exp, diversity_score,
+                                        diversity_exp)
+```
+
+### 3.2.2. Proximity
+```{r}
+# exponential transformation function
+# Unlike diversity, the shorter the distance is, the better the proximity is.
+# So, we have to modify the previous function.
+# We have to reverse the rank as this is opposite of diversity
+# Exponential transformation function
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# Function to rank and exponentially transform a variable in a given table
+rank_exp_proximity <- function(df, var){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  # Create a ranking, reverse the rank for proximity scores, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!!var),
+           reversed_rank = max(rank) - rank + 1,  # Reversing the rank for proximity scores
+           rank_s = scales::rescale(reversed_rank, to = c(0, 1)),  # Rescale the reversed rank to 0-1
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+
+```{r proximity }
+# exponential transformation on each proximity indicator
+proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+
+# proximity score
+proximity <- proximity %>%
+  mutate(proximity_score = (p_c_exp / 5) + (p_edu_exp / 5) +
+           (p_enter_exp / 5) + (p_l_exp / 5) + (p_h_exp / 5))
+
+# Overall proximity exponential transformation
+# Attention: When calculating overall proximity exponential transformation,
+# the higher proximity score, which is combined by 5 proximity subindicators, should receive a higher rank
+# which is different from calculating the proximity subindicators where we gave the lower distance a higher # exponential rank.
+# So, here we use the original 'rank_exp' function to credit those neighbourhoods with high proximity score with higher ranks.
+# If we use the function (rank_exp_proximity) used for calculating proximity subindicators, we will commit an error of giving high proximity scores a lower rank.
+proximity['proximity_exp'] <- rank_exp(proximity, proximity_score)
+
+# final proximity data
+proximity_final <- proximity %>% select(nb_clus, p_c_exp, p_edu_exp,
+                                        p_enter_exp, p_l_exp,
+                                        p_h_exp, proximity_score,
+                                        proximity_exp)
+```
+
+
+### 3.2.3. Population Density
+```{r}
+pop_density['pop_density_exp'] <- rank_exp(pop_density, pop_density)
+
+pop_density_final <- pop_density %>% select(nb_clus,
+                                            pop_density_exp)
+```
+
+
+# 4. Final Index
+```{r}
+# left join diversity and proximity domain
+li_d_p <- diversity_final %>%
+  left_join(proximity_final,
+            by = 'nb_clus')
+
+# left join previous data with population density domain
+li_d_p_pop <- li_d_p %>%
+  left_join(pop_density_final,
+            by = 'nb_clus')
+
+# liveability index - combine three domains
+li <- li_d_p_pop %>%
+  mutate(li_score = (diversity_exp / 3) + (proximity_exp / 3) + 
+           (pop_density_exp / 3))
+
+# calculate the total score
+li['li_exp'] <- rank_exp(li, li_score)
+
+# calculate decile
+li_final <- li %>% mutate(li_rank = min_rank(li_score),
+                          li_decile = ntile(li_score, 10))
+
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/output/liveability_index_500.csv'
+
+write.csv(li_final, file_path, row.names = FALSE)
+```
+
+```{r}
+top_10_rows <- li_final %>%
+  arrange(desc(pop_density_exp)) %>%
+  head(10)
+```
+
+
+
+# 5. Data - 600m
+```{r}
+# read in data
+df <- read.csv(here::here('data', 'final_data', 'final_600.csv'))
+
+diversity <- df[1:6]
+proximity <- df[c(1, 7:11)]
+pop_density <- df[c(1, 12)]
+
+gc()
+```
+
+# 6. Normalisation + Aggregation
+## 6.1. Functions
+```{r functions for diversity}
+# exponential transformation function
+# The higher the value is, the higher transformed value it gets.
+# As higher value indicates the better diversity of neighbourhood
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# function to rank and exponentially transform a variable in a given table
+rank_exp <- function(df, var){
+  
+  var <- enquo(var)
+  # select relevant data from df
+  data <- select(df, nb_clus, !! var)
+  # create a ranking, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!! var),
+           rank_s = scales::rescale(rank, to = c(0, 1)),
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+
+
+## 6.2. Implementation of Functions
+### 6.2.1. Diversity
+```{r diversity}
+# exponential transformation on each diversity indicator
+diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+
+# diversity domain score
+diversity <- diversity %>%
+  mutate(diversity_score = (d_c_exp / 5) + (d_edu_exp / 5) +
+           (d_enter_exp / 5) + (d_l_exp / 5) + (d_h_exp / 5))
+
+# Overall diversity exponential transformation
+diversity['diversity_exp'] <- rank_exp(diversity, diversity_score)
+
+# final diversity data
+diversity_final <- diversity %>% select(nb_clus, d_c_exp, d_edu_exp,
+                                        d_enter_exp, d_l_exp,
+                                        d_h_exp, diversity_score,
+                                        diversity_exp)
+```
+
+### 6.2.2. Proximity
+```{r}
+# exponential transformation function
+# Unlike diversity, the shorter the distance is, the better the proximity is.
+# So, we have to modify the previous function.
+# We have to reverse the rank as this is opposite of diversity
+# Exponential transformation function
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# Function to rank and exponentially transform a variable in a given table
+rank_exp_proximity <- function(df, var){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  # Create a ranking, reverse the rank for proximity scores, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!!var),
+           reversed_rank = max(rank) - rank + 1,  # Reversing the rank for proximity scores
+           rank_s = scales::rescale(reversed_rank, to = c(0, 1)),  # Rescale the reversed rank to 0-1
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+
+```{r proximity }
+# exponential transformation on each proximity indicator
+proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+
+# proximity score
+proximity <- proximity %>%
+  mutate(proximity_score = (p_c_exp / 5) + (p_edu_exp / 5) +
+           (p_enter_exp / 5) + (p_l_exp / 5) + (p_h_exp / 5))
+
+# Overall proximity exponential transformation
+# Attention: When calculating overall proximity exponential transformation,
+# the higher proximity score, which is combined by 5 proximity subindicators, should receive a higher rank
+# which is different from calculating the proximity subindicators where we gave the lower distance a higher # exponential rank.
+# So, here we use the original 'rank_exp' function to credit those neighbourhoods with high proximity score with higher ranks.
+# If we use the function (rank_exp_proximity) used for calculating proximity subindicators, we will commit an error of giving high proximity scores a lower rank.
+proximity['proximity_exp'] <- rank_exp(proximity, proximity_score)
+
+# final proximity data
+proximity_final <- proximity %>% select(nb_clus, p_c_exp, p_edu_exp,
+                                        p_enter_exp, p_l_exp,
+                                        p_h_exp, proximity_score,
+                                        proximity_exp)
+```
+
+
+### 6.2.3. Population Density
+```{r}
+pop_density['pop_density_exp'] <- rank_exp(pop_density, pop_density)
+
+pop_density_final <- pop_density %>% select(nb_clus,
+                                            pop_density_exp)
+```
+
+# 7. Final Index
+```{r}
+# left join diversity and proximity domain
+li_d_p <- diversity_final %>%
+  left_join(proximity_final,
+            by = 'nb_clus')
+
+# left join previous data with population density domain
+li_d_p_pop <- li_d_p %>%
+  left_join(pop_density_final,
+            by = 'nb_clus')
+
+# liveability index - combine three domains
+li <- li_d_p_pop %>%
+  mutate(li_score = (diversity_exp / 3) + (proximity_exp / 3) + 
+           (pop_density_exp / 3))
+
+# calculate the total score
+li['li_exp'] <- rank_exp(li, li_score)
+
+# calculate decile
+li_final <- li %>% mutate(li_rank = min_rank(li_score),
+                          li_decile = ntile(li_score, 10))
+
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/output/liveability_index_600.csv'
+
+write.csv(li_final, file_path, row.names = FALSE)
+```
+

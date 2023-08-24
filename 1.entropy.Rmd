@@ -1,0 +1,1477 @@
+---
+title: "Entropy"
+author: "phil"
+date: "2023-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+### Load Packages
+```{r load packages}
+library(data.table)
+library(doParallel)
+library(cppRouting)
+library(RcppParallel)
+library(sf)
+library(here)
+library(janitor)
+library(tmap)
+library(dplyr)
+library(rgdal)
+library(fpc)
+library(ggplot2)
+library(tidygraph)
+library(igraph)   
+library(tibble)
+library(sp)
+library(sfnetworks)
+library(tidyverse)
+library(purrr)
+library(readxl)
+library(foreach) # for parallel computing
+library(profvis)
+library(concaveman)
+```
+
+## Read in Data
+
+```{r read in borough boundary}
+boros <- st_read(here::here('data', 'boundary', 'London_Borough_Excluding_MHW.shp')) %>% st_transform(., 27700)
+```
+
+```{r read in edge data}
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+```
+
+
+```{r pois preprocessing}
+# read in amenity data
+amenity_pois <- st_read(here::here('data', 'pois', 'amenity_pois.geojson')) %>% st_transform(27700)
+
+
+# read in shop data
+shop_pois <- st_read(here::here('data', 'pois', 'shop_pois.geojson')) %>% st_transform(27700)
+
+
+# read in tourism data
+tourism_pois <- st_read(here::here('data', 'pois', 'tourism_pois.geojson')) %>% st_transform(27700)
+
+
+# rbind three datasets
+pois <- rbind(amenity_pois, shop_pois, tourism_pois)
+
+
+# Clip pois to london boundary and assign london borough name to each poi point
+pois_london <- st_intersection(pois, boros)
+
+
+# select columns
+pois_london <- pois_london %>% select(osmid, amenity, name, X15minute_6_urban_service, detailed_urban_service, NAME, GSS_CODE, HECTARES, lon, lat, geometry)
+
+
+# dropping duplicates that can occur on the way
+pois_london <- pois_london[!duplicated(pois_london$osmid),]
+
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/pois/pois_london.geojson'
+st_write(pois_london, file_path, driver = 'GeoJSON')
+
+# to save memory
+#rm(amenity_pois)
+```
+
+```{r}
+# read in shop data
+pois <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(27700)
+
+length(unique(pois$amenity))
+```
+```{r}
+# check whether number of each amenity service sums up to the total number
+num_living_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity) 
+
+num_commerce_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num_nb <- pois %>% distinct(amenity)
+
+print(list(num_commerce_nb))
+```
+
+```{r}
+# Categorize POI data to 5 categories
+num_living_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity) 
+
+num_commerce_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment_nb <- pois %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+# Create a table to store values
+summary_table <- data.frame(
+  Category = c('Living', 'Commerce', 'Healthcare', 'Education', 'Entertainment'),
+  Amenities = c(paste(num_living_nb$amenity, collapse = ', '),
+                 paste(num_commerce_nb$amenity, collapse = ', '),
+                 paste(num_health_nb$amenity, collapse = ', '),
+                 paste(num_edu_nb$amenity, collapse = ', '),
+                 paste(num_entertainment_nb$amenity, collapse = ', '))
+)
+
+print(summary_table)
+
+# Save the summary_table as a CSV file
+write.csv(summary_table, "summary_table.csv", row.names = FALSE)
+
+
+```
+
+
+## Entropy
+
+
+### Entropy using a buffer
+
+```{r Entropy function using a buffer of 1200m}
+#-----Entropy calculation-------------------------------------
+# walking speed 4.8km/h, walking distance = 1200
+
+neighbors_entropy_par <- function(d, r = 700, cor_num = 1){
+  # d: spatial dataset, r: buffer distance, cor_num: num of cores for parallel processing
+  
+  # buffer the input spatial dataset 'd' using the specified buffer distance 'r'
+  pts_buf <- sf::st_buffer(d, r)
+  
+  # intersections between buffered points and original dataset, which returns a list of indices of points from 'd' that intersect with each buffered point
+  int <- sf::st_intersects(pts_buf, d)
+  
+  # enabling parallel processing
+  registerDoParallel(cor_num)
+  
+  # iterate over each row (i) in the dataset 'd' in parallel,
+  # specify package used in the foreach loop
+  # %dopar% indicates parallel execution of the loop
+  entropy <- foreach(i = 1:nrow(d), 
+                     .combine=c,
+                     .packages='dplyr') %dopar% {
+    
+                       # d[int[[i]],] subsets the dataset 'd' based on the indices obtained from 'int' for the current iteration. This selects the points that intersect with the buffered point.
+    counted <- d[int[[i]],] %>% dplyr::group_by(amenity) %>%
+      dplyr::count()
+    
+    # entropy equation
+    p <- counted$n/sum(counted$n)
+    e <- c(-sum(p*log(p)),sum(counted$n))
+  }
+  
+  # stop parallel processing
+  stopImplicitCluster()
+  
+  data.frame(matrix(entropy, ncol = 2, byrow = TRUE)) %>%
+    rename("entropy" = "X1", "size" = "X2")
+}
+```
+
+#### Entropy using a buffer calculation
+```{r Entropy on all amenity types 1200m}
+# read in pois data in London
+# output.geojson dataset is a modified version of previous pois_london.geojson dataset on Python
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types pois
+pois_london <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(., 27700)
+
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 1200 calculation
+numCores <- 8
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 500, cor_num = numCores)
+})
+
+time # 657.19
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_1200.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+```
+```{r Entropy on all amenity types 800m}
+# read in pois data in London
+# output.geojson dataset is a modified version of previous pois_london.geojson dataset on Python
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types 
+pois_london <- st_read(here::here('data', 'pois', 'output.geojson')) %>% st_transform(., 27700)
+
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 1200 calculation
+numCores <- 8
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 800, cor_num = numCores)
+})
+
+time # 657.19
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_800.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+```
+```{r Entropy on all amenity types 700m}
+# read in pois data in London
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types 
+pois_london <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(., 27700)
+
+gc()
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 400 calculation
+numCores <- 6
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 700, cor_num = 6)
+})
+
+time # 363.51
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+max(london_entropy$entropy) # 3.999 
+max(london_entropy$size) # 11833
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_700.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+
+```
+```{r Entropy on all amenity types 600m}
+# read in pois data in London
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types 
+pois_london <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(., 27700)
+
+gc()
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 400 calculation
+numCores <- 6
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 600, cor_num = 6)
+})
+
+time # 363.51
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+max(london_entropy$entropy) # 3.999 
+max(london_entropy$size) # 11833
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_600.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+
+```
+```{r Entropy on all amenity types 500m}
+# read in pois data in London
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types 
+pois_london <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(., 27700)
+
+gc()
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 400 calculation
+numCores <- 6
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 500, cor_num = numCores)
+})
+
+time # 346.31
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_500.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+
+
+
+# number of amenity check
+num_living <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity)
+
+num_commerce <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num <- london_entropy %>% distinct(amenity)
+```
+```{r Entropy on all amenity types 400m}
+# read in pois data in London
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types 
+pois_london <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(., 27700)
+
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 400 calculation
+numCores <- 6
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 400, cor_num = numCores)
+})
+
+time # 657.19
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_400.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+
+
+
+# number of amenity check
+num_living <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity)
+
+num_commerce <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num <- london_entropy %>% distinct(amenity)
+```
+```{r Entropy on all amenity types 200m}
+# read in pois data in London
+# output.geojson dataset is a modified version of previous pois_london.geojson dataset on Python
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types 
+pois_london <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(., 27700)
+
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 200m calculation
+numCores <- 6
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 200, cor_num = numCores)
+})
+
+time # 380.46
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_200.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+
+
+# number of amenity check
+num_living <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity)
+
+num_commerce <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment <- london_entropy %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num <- london_entropy %>% distinct(amenity)
+```
+```{r Entropy on all amenity types 100m}
+# read in pois data in London
+# output.geojson dataset is a modified version of previous pois_london.geojson dataset on Python
+# Some duplicated/mis-written amenity names were renamed
+# There are 597 amenity types 
+pois_london <- st_read(here::here('data', 'pois', 'output.geojson')) %>% st_transform(., 27700)
+
+length(unique(pois_london$amenity)) # 597
+
+# Entropy using a buffer of 400 calculation
+numCores <- 6
+
+time <- system.time({
+  entropy <- neighbors_entropy_par(pois_london, r = 100, cor_num = numCores)
+})
+
+time # 657.19
+
+# bind the results to the datasets
+london_entropy <- bind_cols(pois_london, entropy)
+
+london_entropy <- london_entropy %>% select(-HECTARES)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_buffer_100.geojson'
+st_write(london_entropy, file_path, driver = 'GeoJSON')
+```
+
+#### Entropy using a buffer map
+```{r entropy map 1200m}
+# read in entropy data
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer.geojson')) %>% st_transform(27700)
+# max entropy
+max(london_entropy$entropy) # 3.999 
+max(london_entropy$size) # 11833
+
+
+# search max value
+max_row <- london_entropy[which.max(london_entropy$size), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' entropy with a buffer of 1200m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+mean(london_entropy$size)
+
+london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 1200m.png",
+          width = 12,
+          height = 16)
+```
+```{r entropy map 800m}
+# read in entropy data
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_800.geojson')) %>% st_transform(27700)
+# max entropy
+max(london_entropy$entropy) # 4.002
+max(london_entropy$size) # 9866
+
+
+# search max value
+max_row <- london_entropy[which.max(london_entropy$size), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' entropy with a buffer of 800m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 800m.png",
+          width = 12,
+          height = 16)
+```
+
+```{r entropy map 700m}
+# max entropy
+max(london_entropy$entropy) # 3.994
+max(london_entropy$size) # 9160
+
+
+# search max value
+max_row <- london_entropy[which.max(london_entropy$size), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' entropy with a buffer of 700m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 700m.pdf",
+          width = 12,
+          height = 16,
+          dpi = 300)
+
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 700m.png",
+          width = 12,
+          height = 16,
+          dpi = 300)
+```
+```{r entropy map 600m}
+# read in entropy data
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_600.geojson')) %>% st_transform(27700)
+# max entropy
+max(london_entropy$entropy) # 3.962
+max(london_entropy$size) # 7494
+
+
+# search max value
+max_row <- london_entropy[which.max(london_entropy$size), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' entropy with a buffer of 600m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 600m.pdf",
+          width = 12,
+          height = 16,
+          dpi = 300)
+```
+```{r entropy map 400m}
+# read in entropy data
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_400.geojson')) %>% st_transform(27700)
+# max entropy
+max(london_entropy$entropy) # 3.979
+max(london_entropy$size) # 5615
+
+
+# search max value
+max_row <- london_entropy[which.max(london_entropy$size), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' entropy with a buffer of 400m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 400m.png",
+          width = 12,
+          height = 16,
+          dpi = 300)
+```
+```{r entropy map 200m}
+# read in entropy data
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_200.geojson')) %>% st_transform(27700)
+# max entropy
+max(london_entropy$entropy) # 3.865
+max(london_entropy$size) # 3908
+
+
+# search max value
+max_row <- london_entropy[which.max(london_entropy$size), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' entropy with a buffer of 200m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 200m.pdf",
+          width = 12,
+          height = 16,
+          dpi = 300)
+
+
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 200m.png",
+          width = 12,
+          height = 16,
+          dpi = 300)
+```
+```{r entropy map 100m}
+# read in entropy data
+#london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_100.geojson')) %>% st_transform(27700)
+# max entropy
+max(london_entropy$entropy) # 3.76
+max(london_entropy$size) # 1403
+
+
+# search max value
+max_row <- london_entropy[which.max(london_entropy$size), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' entropy with a buffer of 500m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_map with a buffer of 500m.png",
+          width = 12,
+          height = 16,
+          dpi = 300)
+```
+
+```{r}
+rm(entropy)
+rm(iso_points)
+rm(london_entropy)
+rm(london_entropy_map)
+rm(max_row)
+rm(pois_london)
+rm(file_path)
+rm(numCores)
+rm(time)
+rm(find_nearest_nodes_on_graph_sf)
+rm(neighbors_entropy_par)
+gc()
+```
+
+
+### Entropy using isochrone
+```{r Entropy using isochrone}
+#-----Neighbourhood formation-------------------------------------
+neighbors_entropy_iso <- function(d, iso, cor_num = 1){
+  
+  # make sure that the isochrone data is perfectly aligned by row with the data.
+  
+  int <- sf::st_intersects(iso, d)
+  
+  # once we have made the intersection, we need to check that they all intersect at least with their own amenity
+  # this is not the case every time because some amenities are in locations with no roads around
+  # while the isochrone uses the underlying road network to build the areas. 
+  
+  checks <- map(int,length) %>% unlist() %>% tibble()
+  
+  # when the intersection is zero, we impose that there is just the amenity for which the isochrone is computed
+  
+  bad_values <- which(checks$. == 0)
+  
+  # put the index of the amenity itself in the intersection
+  int[bad_values] <- bad_values
+  
+  registerDoParallel(cor_num)
+  entropy <- foreach(i = 1:nrow(d), 
+                     .combine=c,
+                     .packages = 'dplyr') %dopar% {
+    counted <- d[int[[i]],] %>% dplyr::group_by(amenity) %>% dplyr::count()
+    p <- counted$n/sum(counted$n)
+    e <- c(-sum(p*log(p)),sum(counted$n))
+  }
+  entropy
+  stopImplicitCluster()
+  data.frame(matrix(entropy, ncol = 2, byrow = TRUE)) %>% rename("entropy" = "X1", "size" = "X2")
+}
+```
+
+#### 1200m
+```{r calculating entropy using isochrone}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '15m', 'london_amenity_isochrone.geojson')) %>% st_transform(27700)
+
+
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 8)
+})
+
+time # 459.15 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso.geojson'
+st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+```
+
+```{r entropy using isochrone map}
+# max entropy
+max(london_entropy_iso$entropy) # 3.9928
+max(london_entropy_iso$size) # 9264
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = 'Entropy of Amenities in London with 1200m ') +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+
+london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_map.pdf",
+          width = 16,
+          height = 20,
+          dpi = 300)
+```
+
+
+
+
+
+#### 800m
+```{r calculating entropy using isochrone 800}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_800.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '10m', 'london_amenity_isochrone_800.geojson')) %>% st_transform(27700)
+
+
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 8)
+})
+
+time # 459.15 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso_800.geojson'
+st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+```
+
+```{r entropy using isochrone map 800m}
+# max entropy
+max(london_entropy_iso$entropy) # 3.977
+max(london_entropy_iso$size) # 6849
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' Entropy with Isochrone of 800m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+
+london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_800_map.png",
+          width = 16,
+          height = 20,
+          dpi = 300)
+```
+
+#### 700m
+```{r calculating entropy using isochrone 600}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_700.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '700m', 'london_amenity_isochrone_700.geojson')) %>% st_transform(27700)
+#rm(entropy, pois_london, neighbors_entropy_par)
+gc()
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 6)
+})
+
+time # 357.95 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso_700.geojson'
+st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+
+
+```
+
+```{r entropy using isochrone map 700m}
+# max entropy
+max(london_entropy_iso$entropy) # 3.97
+max(london_entropy_iso$size) # 5461
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+library(tmap)
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' Entropy with Isochrone of 700m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+
+#london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_700_map.pdf",
+          width = 16,
+          height = 20,
+          dpi = 300)
+
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_700_map.png",
+          width = 16,
+          height = 20,
+          dpi = 300)
+```
+#### 600m
+```{r calculating entropy using isochrone 600}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_600.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+#london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '600m', 'london_amenity_isochrone_600.geojson')) %>% st_transform(27700)
+rm(entropy, pois_london, neighbors_entropy_par)
+gc()
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 8)
+})
+
+time # 459.15 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso_600.geojson'
+st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+
+
+```
+
+```{r entropy using isochrone map 600m}
+# max entropy
+max(london_entropy_iso$entropy) # 3.96
+max(london_entropy_iso$size) # 4937
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+library(tmap)
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' Entropy with Isochrone of 600m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+
+#london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_600_map.pdf",
+          width = 16,
+          height = 20,
+          dpi = 300)
+
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_600_map.png",
+          width = 16,
+          height = 20,
+          dpi = 300)
+```
+
+#### 500m
+```{r calculating entropy using isochrone 400}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_500.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '7m', 'london_amenity_isochrone_500.geojson')) %>% st_transform(27700)
+
+gc()
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 8)
+})
+
+time # 459.15 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+# file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso_500.geojson'
+# st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+
+# read in saved data
+london_entropy_iso <- st_read(here::here('data', 'entropy', 'london_entropy_iso_500.geojson')) %>% st_transform(27700)
+
+# number of amenity check
+num_living <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity)
+
+num_commerce <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num <- london_entropy_iso %>% distinct(amenity)
+```
+
+```{r entropy using isochrone map 500m}
+# max entropy
+max(london_entropy_iso$entropy) # 3.98
+max(london_entropy_iso$size) # 4821
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) +
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"),
+            #legend.text.size = 1.5,
+            main.title= "Amenity Diversity Entropy within a 500m Isodistance", 
+            main.title.position = c('center', 'top'),
+            main.title.size = 1.5,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+# Increase the size of the legend title
+#london_entropy_map <- london_entropy_map + tm_legend(title.size = 1.5)
+
+
+
+#london_entropy_map
+
+# Save the plot as an image file
+# tmap_save(london_entropy_map, 
+#           filename = "london_entropy_iso_500_map.pdf",
+#           width = 16,
+#           height = 20,
+#           dpi = 300)
+
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_500_map.png",
+          width = 8,
+          height = 6,
+          dpi = 300)
+```
+
+
+#### 400m
+```{r calculating entropy using isochrone 400}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_400.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '5m', 'london_amenity_isochrone_400.geojson')) %>% st_transform(27700)
+
+
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 8)
+})
+
+time # 459.15 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso_400.geojson'
+st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+
+
+# number of amenity check
+num_living <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity)
+
+num_commerce <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num <- london_entropy_iso %>% distinct(amenity)
+```
+
+```{r entropy using isochrone map 400m}
+# max entropy
+max(london_entropy_iso$entropy) # 3.95
+max(london_entropy_iso$size) # 3778
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' Entropy with Isochrone of 400m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+
+#london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_400_map.pdf",
+          width = 16,
+          height = 20,
+          dpi = 300)
+
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_400_map.png",
+          width = 16,
+          height = 20,
+          dpi = 300)
+```
+
+
+#### 200m
+```{r calculating entropy using isochrone 200}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_200.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '2.5m', 'london_amenity_isochrone_200.geojson')) %>% st_transform(27700)
+
+
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 6)
+})
+
+time # 459.15 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso_200.geojson'
+st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+
+
+# number of amenity check
+num_living <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity)
+
+num_commerce <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment <- london_entropy_iso %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num <- london_entropy_iso %>% distinct(amenity)
+```
+
+```{r entropy using isochrone map 200m}
+# max entropy
+max(london_entropy_iso$entropy) # 3.76
+max(london_entropy_iso$size) # 1665
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' Entropy with Isochrone of 200m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+
+#london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_200_map.png",
+          width = 16,
+          height = 20,
+          dpi = 300)
+
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_200_map.pdf",
+          width = 16,
+          height = 20,
+          dpi = 300)
+```
+
+#### 100m
+```{r calculating entropy using isochrone 100}
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer_100.geojson')) %>% select(-c(entropy, size)) %>% st_transform(27700)
+
+london_amenity_isochrone <- st_read(here::here('data', 'isochrone', '1m', 'london_amenity_isochrone_100.geojson')) %>% st_transform(27700)
+
+
+# Entropy using isochrone calculation
+time <- system.time({
+  
+  entropy <- neighbors_entropy_iso(london_entropy, london_amenity_isochrone, cor_num = 8)
+})
+
+time # 459.15 
+
+# bind the results to original data
+london_entropy_iso <- bind_cols(london_entropy, entropy)
+
+# save a new data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/entropy/london_entropy_iso_100.geojson'
+st_write(london_entropy_iso, file_path, driver = 'GeoJSON')
+```
+
+```{r entropy using isochrone map 100m}
+# max entropy
+max(london_entropy_iso$entropy) # 3.22
+max(london_entropy_iso$size) # 561
+
+
+# search max value
+max_row <- london_entropy_iso[which.max(london_entropy_iso$entropy), ]
+
+
+#plot the entropy in London
+london_entropy_map <- 
+  tm_shape(boros) + 
+  tm_polygons(col = NA, alpha = 0.5) +
+  
+  tm_shape(edges) + 
+  tm_lines(col = "black",
+           size = 0.5) + 
+  
+  tm_shape(london_entropy_iso) + 
+  tm_dots(col = 'entropy',
+          palette = 'viridis',
+          size = 0.02,
+          style = 'cont',
+          title = 'Entropy') +
+  tm_layout(main.title = "Amenities' Entropy with Isochrone of 100m") +
+  tm_legend(legend.outside = T) + 
+  tm_scale_bar(position = c("right", "top")) 
+
+
+
+#london_entropy_map
+
+# Save the plot as an image file
+tmap_save(london_entropy_map, 
+          filename = "london_entropy_iso_100_map.pdf",
+          width = 16,
+          height = 20,
+          dpi = 300)
+```

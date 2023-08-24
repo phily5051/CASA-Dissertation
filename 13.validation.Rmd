@@ -1,0 +1,442 @@
+---
+title: "validation"
+output: html_document
+date: "2023-08-02"
+---
+
+# 1. Packages
+```{r}
+library(tidyverse)
+library(dplyr)
+library(sf)
+library(here)
+library(janitor)
+library(readxl)
+library(broom)
+library(units)
+```
+
+
+```{r memory usage}
+gc()
+```
+
+# 2. Data
+```{r}
+# hexagon grid data
+hexagon_grid <- st_read(here::here('data', 'locomizer', 'Greater_London.json')) %>% st_transform(27700)
+
+# LSOA IMD data - of 2015 for London so we have to use LSOA boundary of 2011
+# Source: https://data.london.gov.uk/dataset/indices-of-deprivation
+# Source: https://www.gov.uk/government/statistics/english-indices-of-deprivation-2019 
+# File name: scores for the indices of deprivation
+imd <- read_excel(here::here('data', 'IMD', 'ID 2019 for London.xlsx'), 
+                       sheet = 'Sub domains') %>% clean_names() %>%
+  select(1, 2, 3, 4, 11)
+
+
+# Exactly the same as the one from London Datastore
+# imd_from_the_second_site <- read_excel(here::here('data', 'lsoa', 'File_5_-_IoD2019_Scores.xlsx'), 
+#                        sheet = 'IoD2019 Scores') %>% clean_names() %>%
+#   select(1, 2, 3, 4, 17) %>% filter(str_detect(`local_authority_district_code_2019`, "^E09"))
+
+# lsoa boundary - 2011
+lsoa_boundary <- st_read(here::here('data', 'boundary', 'LSOA_2011_London_gen_MHW.shp')) %>% st_transform(27700)
+
+
+# merge data
+imd_london <- left_join(imd, 
+                        lsoa_boundary,
+                        by = c('lsoa_code_2011' = 'LSOA11CD'), .keep_all =  TRUE) %>% st_as_sf()
+
+```
+
+# 3. Projection of LSOA-level Geographical barrier score to Hexagon level
+Due to the irregular shape of neighbourhoods, LSOA-level IMD scores are projected to a hexagon grid level. The hexagon grid provides a finer resolution than both the LSOA and neighbourhood levels. This approach can help in aggregating the IMD scores to a more appropriate spatial scale that aligns with the neighbourhood boundaries, taking advantage of the finer resolution of the hexagon grid.
+```{r}
+# Calculate area of each polygon in LSOA data
+imd_london$oa_area <- st_area(imd_london)
+
+# Projecting the lsoa data onto the hexagonal grid
+intersections <- st_intersection(hexagon_grid, imd_london)
+
+# Calculate the ratio of intersection area to original polygon area
+intersections$oa_ratio <- st_area(intersections) / imd_london$oa_area
+
+
+# Calculate the weighted IMD score for each intersection (hexagon)
+intersections$weighted_imd <- intersections$geographical_barriers_sub_domain_score * intersections$oa_ratio
+
+# When sum of weights does not sum up to 1, weighted average is calculated by 
+# Sum of each number multiplied by its weight / sum of all weights = weighted average
+# Group by hexagon index
+hexagon_scores <- intersections %>%
+  group_by(X_index) %>%
+  summarize(weighted_avg_imd = sum(weighted_imd) / sum(oa_ratio)) 
+
+
+# Weighted average IMD score using weighted.mean() - the same results
+# hex_score <- intersections %>%
+#   group_by(X_index) %>%
+#   summarize(weighted_avg_imd = weighted.mean(as_units(geographical_barriers_sub_domain_score, "1"), oa_ratio))
+
+
+
+# # # save data - just those with populations
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/lsoa/hexagon_imd.geojson'
+st_write(hexagon_scores, file_path, driver = 'GeoJSON')
+```
+
+
+```{r}
+# Calculate area of each polygon in LSOA data
+imd_london$oa_area <- st_area(imd_london)
+
+# Projecting the lsoa data onto the hexagonal grid
+intersections <- st_intersection(hexagon_grid, imd_london)
+
+# Calculate the ratio of intersection area to original polygon area
+intersections$oa_ratio <- st_area(intersections) / intersections$oa_area
+
+max(intersections$oa_ratio)
+
+# Calculate the weighted IMD score for each intersection (hexagon)
+intersections$weighted_imd <- intersections$geographical_barriers_sub_domain_score * intersections$oa_ratio
+
+# When sum of weights does not sum up to 1, weighted average is calculated by 
+# Sum of each number multiplied by its weight / sum of all weights = weighted average
+# Group by hexagon index
+hexagon_scores <- intersections %>%
+  group_by(X_index) %>%
+  summarize(weighted_avg_imd = sum(weighted_imd) / sum(oa_ratio)) 
+
+
+# Weighted average IMD score using weighted.mean() - the same results
+# hex_score <- intersections %>%
+#   group_by(X_index) %>%
+#   summarize(weighted_avg_imd = weighted.mean(as_units(geographical_barriers_sub_domain_score, "1"), oa_ratio))
+
+max(hexagon_scores$weighted_avg_imd)
+min(hexagon_scores$weighted_avg_imd)
+
+# # # save data - just those with populations
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/IMD/hexagon_imd.geojson'
+st_write(hexagon_scores, file_path, driver = 'GeoJSON')
+```
+
+
+
+When projecting population data to a finer grid like hexagons, you would generally use the cumulative sum approach. This is because each hexagon might intersect with multiple LSOA polygons, and you want to aggregate the population figures from all intersecting LSOAs to get an estimate of the population within that hexagon. Cumulative sum would be the appropriate method in this case.
+
+On the other hand, when projecting exam results or scores, the weighted mean makes more sense. This is because exam scores are more sensibly averaged when aggregating over different polygons. Summing them up might not provide meaningful insights, especially when dealing with variations in the exam scores in different polygons.
+
+Both methods have their applications. Thus, when you are dealing with counts (like population) the cumulative sum approach makes more sense, while when dealing measures (like exam scores) the weighted mean approach makes more sense.
+
+# 4. Projecting hexagon-level IMD score to neighbourhood-level
+## 4.1. Isochrone 500m
+```{r}
+gc()
+
+# read in neighbourhood polygon at isochrone of 500m
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+```
+
+
+```{r GBS scores at neighbourhood level}
+# calculate the area size of each neighbourhood
+hexagon_scores$hex_area <- st_area(hexagon_scores)
+
+# Perform spatial intersection
+intersection <- st_intersection(hexagon_scores, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+max(intersection$area_proportion)
+min(intersection$area_proportion)
+
+# Calculate the estimated population within each neighborhood polygon
+intersection$estimated_imd_score <- intersection$weighted_avg_imd * intersection$area_proportion
+
+# When sum of weights does not sum up to 1, weighted average is calculated by 
+# Sum of each number multiplied by its weight / sum of all weights = weighted average
+# Group by hexagon index
+neighbourhood_imd <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(weighted_avg_imd = sum(estimated_imd_score) / sum(area_proportion))
+
+min(neighbourhood_imd$weighted_avg_imd)
+max(neighbourhood_imd$weighted_avg_imd)
+
+# # save data - just those with populations
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/IMD/neighbourhood_500_imd.geojson'
+# #
+st_write(neighbourhood_imd, file_path, driver = 'GeoJSON')
+
+```
+
+
+## 4.2. Isochrone 600m
+```{r}
+gc()
+# read in hexagon imd data
+hex_imd <- st_read(here::here('data', 'IMD', 'hexagon_imd.geojson')) %>% st_transform(27700)
+
+
+# read in neighbourhood polygon at isochrone of 600m
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_600.geojson')) %>% st_transform(27700)
+```
+
+```{r population at neighbourhood level}
+# calculate the area size of each neighbourhood
+hex_imd$hex_area <- st_area(hex_imd)
+
+# Perform spatial intersection
+intersection <- st_intersection(hex_imd, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+# Calculate the estimated population within each neighborhood polygon
+intersection$estimated_imd_score <- intersection$weighted_avg_imd * intersection$area_proportion
+
+# When sum of weights does not sum up to 1, weighted average is calculated by 
+# Sum of each number multiplied by its weight / sum of all weights = weighted average
+# Group by hexagon index
+neighbourhood_imd <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(weighted_avg_imd = sum(estimated_imd_score) / sum(area_proportion))
+
+min(neighbourhood_imd$weighted_avg_imd)
+max(neighbourhood_imd$weighted_avg_imd)
+
+# # save data - just those with populations
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/IMD/neighbourhood_600_imd.geojson'
+# #
+st_write(neighbourhood_imd, file_path, driver = 'GeoJSON')
+
+```
+
+# 5. Correlation test
+## 5.1. 500m
+```{r read in data}
+imd <- st_read(here::here('data', 'IMD', 'neighbourhood_500_imd.geojson')) %>% st_transform(27700)
+lci <- read_csv(here::here('output', 'liveability_index_500.csv'))
+gc()
+```
+
+```{r merge data}
+# Merge the dataframes based on the 'nb_clus' column
+merged_data <- merge(imd, lci, by = "nb_clus")
+```
+
+```{r}
+# correlation test
+cor.test(merged_data$weighted_avg_imd, merged_data$li_exp,
+         conf.level = 0.99)
+```
+The correlation between two indices are significantly different from 0 at the 1% level.
+
+```{r linear regression}
+# Calculate the R-squared and RMSE (Root Mean Squared Error)
+lm_model <- lm(weighted_avg_imd ~ li_exp, data = merged_data)
+tidy(lm_model)
+glance(lm_model)
+
+# RMSE
+predicted_values <- predict(lm_model)
+rmse <- sqrt(mean((merged_data$li_exp - predicted_values)^2))
+```
+An increase of the li_exp by 1 unit decreases the IMD score by 0.018. The adjusted R-square of 0.38 between the Liveability Composite Index (LCI) and the IMD score. RMSE is 29.94.
+
+```{r plot}
+# Create a scatter plot
+plot <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_imd)) +
+  geom_jitter(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "dodgerblue2") +
+  xlab("LI score") +
+  ylab("Geographical Barriers Sub-domain score") +
+  ggtitle("Correlation between LI score and the GBS score") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+ggsave('correlation_plot.png', plot, dpi = 300, width = 6, height = 6)
+```
+
+```{r}
+library(ggplot2)
+
+# Get the list of residuals
+res <- resid(lm_model)
+
+# Create a data frame for the plot
+residuals_df <- data.frame(fitted = fitted(lm_model), residual = res)
+
+# Create the plot using ggplot2
+plot1 <- ggplot(residuals_df, aes(x = fitted, y = residual)) +
+  geom_jitter(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  xlab("Fitted Values") +
+  ylab("Residuals") +
+  ggtitle("Residuals vs. Fitted Plot") +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+ggsave('residual_plot.png', plot1, dpi = 300, width = 6, height = 6)
+```
+
+
+
+
+```{r}
+#create Q-Q plot for residuals
+qqnorm(res)
+
+#add a straight diagonal line to the plot
+qqline(res) 
+```
+
+
+
+## 5.2. 500m - active travel and lci
+```{r read in data}
+
+```
+
+```{r merge data}
+# Merge the dataframes based on the 'nb_clus' column
+merged_data <- merge(imd, lci, by = "nb_clus")
+```
+
+```{r}
+# correlation test
+cor.test(merged_data$weighted_avg_imd, merged_data$li_exp,
+         conf.level = 0.99)
+```
+The correlation between two indices are significantly different from 0 at the 1% level.
+
+```{r linear regression}
+# Calculate the R-squared and RMSE (Root Mean Squared Error)
+lm_model <- lm(weighted_avg_imd ~ li_exp, data = merged_data)
+tidy(lm_model)
+glance(lm_model)
+
+# RMSE
+predicted_values <- predict(lm_model)
+rmse <- sqrt(mean((merged_data$li_exp - predicted_values)^2))
+```
+An increase of the li_exp by 1 unit decreases the IMD score by 0.018. The adjusted R-square of 0.38 between the Liveability Composite Index (LCI) and the IMD score. RMSE is 29.94.
+
+```{r plot}
+# Create a scatter plot
+plot <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_imd)) +
+  geom_jitter(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "dodgerblue2") +
+  xlab("LI score") +
+  ylab("Geographical Barriers Sub-domain score") +
+  ggtitle("Correlation between LI score and the GBS score") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+ggsave('correlation_plot.png', plot, dpi = 300, width = 6, height = 6)
+```
+
+```{r}
+library(ggplot2)
+
+# Get the list of residuals
+res <- resid(lm_model)
+
+# Create a data frame for the plot
+residuals_df <- data.frame(fitted = fitted(lm_model), residual = res)
+
+# Create the plot using ggplot2
+plot1 <- ggplot(residuals_df, aes(x = fitted, y = residual)) +
+  geom_jitter(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  xlab("Fitted Values") +
+  ylab("Residuals") +
+  ggtitle("Residuals vs. Fitted Plot") +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+ggsave('residual_plot.png', plot1, dpi = 300, width = 6, height = 6)
+```
+
+
+
+
+```{r}
+#create Q-Q plot for residuals
+qqnorm(res)
+
+#add a straight diagonal line to the plot
+qqline(res) 
+```
+
+
+
+
+```{r}
+# correlation test
+cor.test(merged_data$weighted_avg_imd, merged_data$li_exp,
+         conf.level = 0.99)
+```
+The correlation between two indices are significantly different from 0 at the 1% level.
+
+```{r linear regression}
+# Calculate the R-squared and RMSE (Root Mean Squared Error)
+lm_model <- lm(weighted_avg_imd ~ li_exp, data = merged_data)
+tidy(lm_model)
+glance(lm_model)
+
+# RMSE
+predicted_values <- predict(lm_model)
+rmse <- sqrt(mean((merged_data$li_exp - predicted_values)^2))
+```
+An increase of the li_exp by 1 unit decreases the IMD score by 0.019. The adjusted R-square of 0.44 between the Liveability Composite Index (LCI) and the IMD score. RMSE is 29.95.
+
+
+```{r plot}
+# Create a scatter plot
+plot2 <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_imd)) +
+  geom_jitter(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "dodgerblue2") +
+  xlab("LCI") +
+  ylab("IMD Score") +
+  ggtitle("The Correlation between LCI and IMD") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+ggsave('correlation_plot_600.png', plot2, dpi = 300, width = 6, height = 6)
+```
+
+```{r}
+# Get the list of residuals
+res <- resid(lm_model)
+
+# Create a data frame for the plot
+residuals_df <- data.frame(fitted = fitted(lm_model), residual = res)
+
+# Create the plot using ggplot2
+plot3 <- ggplot(residuals_df, aes(x = fitted, y = residual)) +
+  geom_jitter(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  xlab("Fitted Values") +
+  ylab("Residuals") +
+  ggtitle("Residuals vs. Fitted Plot") +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+ggsave('residual_plot_600.png', plot3, dpi = 300, width = 6, height = 6)
+```
+
+```{r}
+#create Q-Q plot for residuals
+qqnorm(res)
+
+#add a straight diagonal line to the plot
+qqline(res) 
+```

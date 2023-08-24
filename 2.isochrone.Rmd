@@ -1,0 +1,1773 @@
+---
+title: "isochrone"
+author: "phil"
+date: "2023-07-11"
+output: html_document
+---
+
+### Load Packages
+```{r load packages}
+library(data.table)
+library(doParallel)
+library(cppRouting)
+library(RcppParallel)
+library(sf)
+library(here)
+library(dplyr)
+library(rgdal)
+library(fpc)
+library(tibble)
+library(sp)
+library(tidyverse)
+library(concaveman)
+library(foreach)
+```
+
+
+```{r memory usage}
+gc()
+```
+
+
+### Construct a Graph
+#### Edge data preprocessing
+
+Edge-wise data cleaning is as follows: 
+First, create of edge identifier and extract of node coordinates from each edge.
+Second, create node identiers based on unique X, Y coordinates 
+Third, plug in the start/end node to edge data -> creation of from, to columns 
+Finally, keep the unique node ID and convert X, Y coordinates of nodes to point geometry 
+
+```{r read in London road OSM data}
+# read in street road data
+# st_layers(here::here('data', 'london_all.gpkg'))
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+```
+
+
+```{r create edge indices}
+# create unique edge identifier
+edges <- edges %>% dplyr::select(from, to, highway, length, geom) %>% dplyr::mutate(edgeID = c(1:n())) %>%
+  dplyr::select(edgeID, from, to, highway, length, geom)
+```
+
+
+```{r create nodes}
+# create nodes at the start and end point of each edge
+# give each node a unique index
+nodes <- edges %>% 
+  st_coordinates() %>%
+  as_tibble() %>%
+  dplyr::rename(edgeID = L1) %>%
+  group_by(edgeID) %>%
+  slice(c(1,n())) %>%
+  ungroup() %>%
+  dplyr::mutate(start_end = rep(c('start', 'end'), times = n()/2)) %>%
+  dplyr::mutate(xy = paste(.$X, .$Y)) %>%
+  
+  # by using factor(), we can see many unique point geometry
+  # based on this, we give node indices
+  dplyr::mutate(nodeID = group_indices(., factor(xy, levels = unique(xy)))) %>%
+  dplyr::select(-xy)
+```
+
+
+```{r from/to points for edge}
+# start, end points for each edge
+# pull out start nodes
+start_nodes <- nodes %>% 
+  filter(start_end == 'start') %>%
+  pull(nodeID)
+
+# pull out end nodes
+end_nodes <- nodes %>%
+  filter(start_end == 'end') %>%
+  pull(nodeID)
+
+# plug in start/end nodes and reorder columns
+edges <- edges %>% select(-c(from, to)) %>%
+  mutate(from = start_nodes, to = end_nodes) %>%
+  select(from, to, highway, length, edgeID, geom)
+
+# remove end_nodes and start_nodes to save memory usage
+rm(end_nodes)
+rm(start_nodes)
+```
+
+
+```{r nodes data cleaning}
+# remove duplicate nodes & set the same crs (EPSG:27700)
+nodes <- nodes %>% 
+  # keep unique node ID
+  distinct(nodeID, .keep_all = TRUE) %>%
+  dplyr::select(-c(edgeID, start_end)) 
+#%>%
+  # X, Y coords to point geometry
+  
+  #st_as_sf(coords = c('X', 'Y')) %>%
+  # set the same CRS as edges
+  
+  #st_set_crs(st_crs(edges))
+
+```
+
+
+#### Create road network
+
+cppRouting package
+```{r create network}
+# set the number of threads used by cppRouting
+RcppParallel::setThreadOptions(numThreads = 1)
+
+# prepare data to an appropriate format
+roads <- edges %>% select(from, to, length) %>% st_drop_geometry() %>% as.data.table()
+
+coord <- nodes %>% select(nodeID, X, Y) %>% as.data.table()
+
+# instantiate a graph with coordinates
+
+graph  <-  roads %>% 
+  makegraph(directed = F,
+            coords = coord)
+
+# remove edges and nodes to save memory
+rm(edges)
+rm(nodes)
+rm(coord)
+rm(roads)
+```
+
+
+```{r simplify graph}
+# remove non-intersection nodes, duplicated edges and isolated loops - simplify graph
+graph <- graph %>%
+  cppRouting::cpp_simplify(rm_loop = T,
+                           iterate = F)
+
+```
+
+### Isochrone
+#### Find the nearest nodes on the graph
+```{r finding nearest node on the graph function}
+# this function finds the nearest nodes on the graph
+find_nearest_nodes_on_graph_sf <- function(point_data, graph, crs = 27700) {
+  
+  nodes_on_graph <- graph$coords %>% st_as_sf(., 
+                                              coords = c('X', 'Y'),
+                                              crs = 27700) 
+  
+  poi_data <- point_data %>% st_transform(27700)
+  
+  graph$coords[st_nearest_feature(poi_data, nodes_on_graph),'nodeID']
+  
+  
+}
+```
+
+
+```{r find nearest nodes for pois on graph}
+# read in london entropy
+london_entropy <- st_read(here::here('data', 'entropy', 'london_entropy_buffer.geojson')) %>% st_transform(27700)
+
+# find nearest nodes for POIs on the graph
+nearest_nodes <- find_nearest_nodes_on_graph_sf(london_entropy, graph, crs = 27700)
+
+# pois projected on graph
+# bind the nearest nodes ID with original pois
+# nodeID indicates the nodeID of projected pois in the graph
+# drop original geometry of pois because we will embed geometries of nodeIDs from the graph
+pois_projected_on_graph <- cbind(london_entropy, nearest_nodes) %>% st_drop_geometry()
+
+
+# sf object, a pair of nodeID and point geometry
+geom<- graph$coords %>% st_as_sf(.,
+                          coords = c('X', 'Y'),
+                          crs = 27700)
+
+# join geometry of each nodeID to original sf object - you have original lat, lon of pois as well as geometry of projected pois on the graph 
+iso_points <- left_join(pois_projected_on_graph,
+                        geom,
+                        by = 'nodeID')
+
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/projected_on_graph/pois_projected_on_graph.geojson'
+
+st_write(iso_points, file_path, driver = "GeoJSON")
+
+```
+
+
+#### Isochrone calculation 1200m
+```{r isochrone for pois 1200m}
+# this code searches a set of nodes on graph that can be reached within 15 min from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700)
+
+reachable_nodes_for_pois_1200 <- lapply(iso_points$nodeID, function(nodeID) {
+  get_isochrone(graph, from = nodeID, lim = 1200)
+})
+
+saveRDS(reachable_nodes_for_pois_1200, file = 'reachable_nodes_for_pois_1200.RData')
+readRDS('reachable_nodes_for_pois_1200.RData')
+
+```
+
+#### Isochrone calculation 800m
+```{r finding reachable nodes function}
+reachable_nodes_for_pois <- function(graph, data, lim = 800, cores = 1){
+  nodeID <- data$nodeID
+  chunks <- floor(length(nodeID) / cores)
+  rest <- length(nodeID) %% cores
+  
+  registerDoParallel(cores)
+  reachable_nodes <- foreach(j = 1:cores, .combine=c, .packages = 'cppRouting') %dopar% {
+    node_final <- list()
+    idx <- 1  # Counter for the index in the node_final list
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    }
+    node_final
+  }
+  stopImplicitCluster()
+  reachable_nodes
+}
+```
+
+```{r isochrone for pois 800m}
+# this code searches a set of nodes on graph that can be reached within 15 min from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700) 
+
+# select columns
+iso_points <- iso_points %>% select(c(12,13))
+
+
+# apply a function
+profvis::profvis({
+  reachable_nodes_for_pois_800 <- reachable_nodes_for_pois(graph, iso_points, lim = 800, cores = 5)
+})
+
+
+saveRDS(reachable_nodes_for_pois_800, file = 'reachable_nodes_for_pois_800.RData')
+#readRDS('reachable_nodes_for_pois_800.RData')
+
+```
+
+
+#### Isochrone calculation 700m
+```{r finding reachable nodes function}
+reachable_nodes_for_pois <- function(graph, data, lim = 700, cores = 1){
+  nodeID <- data$nodeID
+  chunks <- floor(length(nodeID) / cores)
+  rest <- length(nodeID) %% cores
+  
+  registerDoParallel(cores)
+  reachable_nodes <- foreach(j = 1:cores, .combine=c, .packages = 'cppRouting') %dopar% {
+    node_final <- list()
+    idx <- 1  # Counter for the index in the node_final list
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    }
+    node_final
+  }
+  stopImplicitCluster()
+  reachable_nodes
+}
+```
+
+```{r isochrone for pois 700m}
+# this code searches a set of nodes on graph that can be reached within 15 min from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700) 
+
+# select columns
+iso_points <- iso_points %>% select(c(12,13))
+
+gc()
+
+# apply a function
+profvis::profvis({
+  reachable_nodes_for_pois_700 <- reachable_nodes_for_pois(graph, iso_points, lim = 700, cores = 6)
+})
+
+
+saveRDS(reachable_nodes_for_pois_700, file = 'reachable_nodes_for_pois_700.RData')
+#readRDS('reachable_nodes_for_pois_800.RData')
+
+```
+
+
+#### Finding corresponding geometries
+Finding geometries of reachable nodes and creating polygons out of them are computationally intensive so I split the dataset of about 200,000 rows into 5 subsets (40,000 each).
+```{r finding geometries funciton}
+find_geometries <- function(graph, reachable_nodes_list, cores = 1) {
+  chunks <- floor(length(reachable_nodes_list) / cores)
+  rest <- length(reachable_nodes_list) %% cores
+  
+  registerDoParallel(cores)
+  geometries <- foreach(j = 1:cores, .combine = c, .packages = c('sf', 'dplyr')) %dopar% {
+    geom_final <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    }
+    geom_final
+  }
+  stopImplicitCluster()
+  geometries
+}
+
+```
+
+
+#### apply function
+```{r find geometries of reachable nodes example}
+# Read in the list of reachable nodes data
+subset <- readRDS('reachable_nodes_for_pois_700.RData')
+subset <- subset[1:100000]
+rm(reachable_nodes_for_pois)# parallel processing
+gc()
+
+# parallel processing with lapply
+profvis::profvis({
+  subset_geometries <- find_geometries(graph, subset, cores = 5)
+})
+
+rm(subset)
+gc()
+
+saveRDS(subset_geometries, file = 'subset_geometries_700_1.RData')
+
+rm(subset_geometries)
+gc()
+
+rm(graph)
+rm(find_geometries)
+gc()
+```
+
+
+```{r find geometries of reachable nodes example}
+# Read in the list of reachable nodes data
+subset <- readRDS('reachable_nodes_for_pois_700.RData')
+subset <- subset[100001:length(subset)]
+rm(reachable_nodes_for_pois)# parallel processing
+gc()
+
+# parallel processing with lapply
+profvis::profvis({
+  subset_geometries <- find_geometries(graph, subset, cores = 5)
+})
+
+rm(subset)
+gc()
+
+saveRDS(subset_geometries, file = 'subset_geometries_700_2.RData')
+
+rm(subset_geometries)
+gc()
+
+rm(graph)
+rm(find_geometries)
+gc()
+```
+
+
+
+#### Creating polygons
+```{r creating polygons function}
+# this function creates polygons from geometry of points and then return the output in the form of a sf dataframe
+create_poly <- function(geometries_list, cores = 1){
+  chunks <- floor(length(geometries_list) / cores)
+  rest <- length(geometries_list) %% cores
+  
+  registerDoParallel(cores)
+  polygons <- foreach(j = 1:cores, .combine = c, .packages = 'concaveman') %dopar% {
+    poly_list <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    }
+    poly_list
+  }
+  stopImplicitCluster()
+  poly_df <- data.table::rbindlist(polygons)
+  poly_df
+}
+  
+
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_1.RData')
+subset_geometries <- subset_geometries[1:35000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_1.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_1.RData')
+subset_geometries <- subset_geometries[35001:60000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_2.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_1.RData')
+subset_geometries <- subset_geometries[60001:80000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_3.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_1.RData')
+subset_geometries <- subset_geometries[80001:100000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_4.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_2.RData')
+subset_geometries <- subset_geometries[1:20000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_5.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_2.RData')
+subset_geometries <- subset_geometries[20001:40000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_6.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_2.RData')
+subset_geometries <- subset_geometries[40001:55000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_7.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_2.RData')
+subset_geometries <- subset_geometries[55001:70000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_8.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_2.RData')
+subset_geometries <- subset_geometries[70001:82000]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_9.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_700_2.RData')
+subset_geometries <- subset_geometries[82001:length(subset_geometries)]
+#rm(subset_polygons)
+gc()
+
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/subset_isochrone_700_10.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+#### Isochrone calculation 600m
+```{r finding reachable nodes function}
+reachable_nodes_for_pois <- function(graph, data, lim = 600, cores = 1){
+  nodeID <- data$nodeID
+  chunks <- floor(length(nodeID) / cores)
+  rest <- length(nodeID) %% cores
+  
+  registerDoParallel(cores)
+  reachable_nodes <- foreach(j = 1:cores, .combine=c, .packages = 'cppRouting') %dopar% {
+    node_final <- list()
+    idx <- 1  # Counter for the index in the node_final list
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    }
+    node_final
+  }
+  stopImplicitCluster()
+  reachable_nodes
+}
+```
+
+```{r isochrone for pois 600m}
+# this code searches a set of nodes on graph that can be reached within 15 min from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700) 
+
+# select columns
+iso_points <- iso_points %>% select(c(12,13))
+
+gc()
+
+# apply a function
+profvis::profvis({
+  reachable_nodes_for_pois_600 <- reachable_nodes_for_pois(graph, iso_points, lim = 600, cores = 6)
+})
+
+
+saveRDS(reachable_nodes_for_pois_600, file = 'reachable_nodes_for_pois_600.RData')
+#readRDS('reachable_nodes_for_pois_800.RData')
+
+```
+
+#### Finding corresponding geometries
+Finding geometries of reachable nodes and creating polygons out of them are computationally intensive so I split the dataset of about 200,000 rows into 5 subsets (40,000 each).
+```{r finding geometries funciton}
+find_geometries <- function(graph, reachable_nodes_list, cores = 1) {
+  chunks <- floor(length(reachable_nodes_list) / cores)
+  rest <- length(reachable_nodes_list) %% cores
+  
+  registerDoParallel(cores)
+  geometries <- foreach(j = 1:cores, .combine = c, .packages = c('sf', 'dplyr')) %dopar% {
+    geom_final <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    }
+    geom_final
+  }
+  stopImplicitCluster()
+  geometries
+}
+
+```
+
+
+#### apply function
+```{r find geometries of reachable nodes example}
+# Read in the list of reachable nodes data
+subset <- readRDS('reachable_nodes_for_pois_600.RData')
+
+# parallel processing
+gc()
+
+# parallel processing with lapply
+profvis::profvis({
+  subset_geometries <- find_geometries(graph, subset, cores = 5)
+})
+
+rm(subset)
+gc()
+
+saveRDS(subset_geometries, file = 'subset_geometries_600.RData')
+
+rm(subset_geometries)
+gc()
+
+rm(graph)
+rm(find_geometries)
+gc()
+```
+
+
+#### Creating polygons
+```{r creating polygons function}
+# this function creates polygons from geometry of points and then return the output in the form of a sf dataframe
+create_poly <- function(geometries_list, cores = 1){
+  chunks <- floor(length(geometries_list) / cores)
+  rest <- length(geometries_list) %% cores
+  
+  registerDoParallel(cores)
+  polygons <- foreach(j = 1:cores, .combine = c, .packages = 'concaveman') %dopar% {
+    poly_list <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    }
+    poly_list
+  }
+  stopImplicitCluster()
+  poly_df <- data.table::rbindlist(polygons)
+  poly_df
+}
+  
+
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[1:24300]
+#rm(subset_polygons)
+gc()
+
+# Bench marking
+## test with a function using do parallel: memory(32.2) time(4320) 
+# profvis::profvis({
+#   test<- create_poly(subset_geometries, cores = 6)
+# })
+# 
+# ## test with lapply: memory(222), time(15880)
+# profvis::profvis({
+#   registerDoParallel(6)
+#   subset_polygons <- foreach(geometries = subset_geometries, .combine = rbind) %dopar% {
+#   concaveman::concaveman(geometries)
+#   }
+#   stopImplicitCluster()
+# })
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_1.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[24301:48600]
+#rm(subset_polygons)
+gc()
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_2.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[48601:73000]
+#rm(subset_polygons)
+gc()
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_3.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[73001:98000]
+#rm(subset_polygons)
+gc()
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_4.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[98001:122000]
+#rm(subset_polygons)
+gc()
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_5.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[122001:145000]
+#rm(subset_polygons)
+gc()
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_6.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[145001:168000]
+#rm(subset_polygons)
+gc()
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_7.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone 600m}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_600.RData')
+subset_geometries <- subset_geometries[168001:length(subset_geometries)]
+#rm(subset_polygons)
+gc()
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/600m/subset_isochrone_600_8.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+
+
+
+### ISochrone 500m
+```{r finding reachable nodes function}
+reachable_nodes_for_pois <- function(graph, data, lim = 500, cores = 1){
+  nodeID <- data$nodeID
+  chunks <- floor(length(nodeID) / cores)
+  rest <- length(nodeID) %% cores
+  
+  registerDoParallel(cores)
+  reachable_nodes <- foreach(j = 1:cores, .combine=c, .packages = 'cppRouting') %dopar% {
+    node_final <- list()
+    idx <- 1  # Counter for the index in the node_final list
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    }
+    node_final
+  }
+  stopImplicitCluster()
+  reachable_nodes
+}
+```
+
+```{r isochrone for pois 400m}
+# this code searches a set of nodes on graph that can be reached within 15 min from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700)
+
+# select columns
+iso_points <- iso_points %>% select(c(12,13))
+
+# comparison - cores 7 is the best
+# test <- iso_points[1:1000,]
+# profvis::profvis({
+#   test_l <- lapply(test$nodeID, function(nodeID) {
+#   get_isochrone(graph, from = nodeID, lim = 400)
+# })
+# })
+# profvis::profvis({
+#   test_p_4 <- reachable_nodes_for_pois(graph, test, lim = 400, cores = 4)
+# })
+
+gc()
+# apply a function
+profvis::profvis({
+  reachable_nodes_for_pois_500 <- reachable_nodes_for_pois(graph, iso_points, lim = 500, cores = 6)
+})
+
+
+saveRDS(reachable_nodes_for_pois_500, file = 'reachable_nodes_for_pois_500.RData')
+#readRDS('reachable_nodes_for_pois_400.RData')
+
+```
+
+### Isochrone calculation 400m
+```{r finding reachable nodes function}
+reachable_nodes_for_pois <- function(graph, data, lim = 400, cores = 1){
+  nodeID <- data$nodeID
+  chunks <- floor(length(nodeID) / cores)
+  rest <- length(nodeID) %% cores
+  
+  registerDoParallel(cores)
+  reachable_nodes <- foreach(j = 1:cores, .combine=c, .packages = 'cppRouting') %dopar% {
+    node_final <- list()
+    idx <- 1  # Counter for the index in the node_final list
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = lim)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    }
+    node_final
+  }
+  stopImplicitCluster()
+  reachable_nodes
+}
+```
+
+```{r isochrone for pois 400m}
+# this code searches a set of nodes on graph that can be reached within 15 min from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700)
+
+# select columns
+iso_points <- iso_points %>% select(c(12,13))
+
+# comparison - cores 7 is the best
+# test <- iso_points[1:1000,]
+# profvis::profvis({
+#   test_l <- lapply(test$nodeID, function(nodeID) {
+#   get_isochrone(graph, from = nodeID, lim = 400)
+# })
+# })
+# profvis::profvis({
+#   test_p_4 <- reachable_nodes_for_pois(graph, test, lim = 400, cores = 4)
+# })
+
+gc()
+# apply a function
+profvis::profvis({
+  reachable_nodes_for_pois_400 <- reachable_nodes_for_pois(graph, iso_points, lim = 400, cores = 7)
+})
+
+
+saveRDS(reachable_nodes_for_pois_400, file = 'reachable_nodes_for_pois_400.RData')
+#readRDS('reachable_nodes_for_pois_400.RData')
+gc()
+```
+
+#### Finding corresponding geometries
+Finding geometries of reachable nodes and creating polygons out of them are computationally intensive so I split the dataset of about 200,000 rows into 5 subsets (40,000 each).
+```{r finding geometries funciton}
+find_geometries <- function(graph, reachable_nodes_list, cores = 1) {
+  chunks <- floor(length(reachable_nodes_list) / cores)
+  rest <- length(reachable_nodes_list) %% cores
+  
+  registerDoParallel(cores)
+  geometries <- foreach(j = 1:cores, .combine = c, .packages = c('sf', 'dplyr')) %dopar% {
+    geom_final <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    }
+    geom_final
+  }
+  stopImplicitCluster()
+  geometries
+}
+
+```
+
+
+
+
+#### apply function
+```{r find geometries of reachable nodes example}
+# Read in the list of reachable nodes data
+subset <- readRDS('reachable_nodes_for_pois_500.RData')
+
+# parallel processing
+gc()
+
+# parallel processing with lapply
+profvis::profvis({
+  subset_geometries <- find_geometries(graph, reachable_nodes_for_pois_500, cores = 6)
+})
+
+rm(subset)
+gc()
+
+saveRDS(subset_geometries, file = 'subset_geometries_500.RData')
+
+rm(subset_geometries)
+gc()
+
+rm(graph)
+rm(find_geometries)
+gc()
+```
+
+#### Creating polygons
+```{r creating polygons function}
+# this function creates polygons from geometry of points and then return the output in the form of a sf dataframe
+create_poly <- function(geometries_list, cores = 1){
+  chunks <- floor(length(geometries_list) / cores)
+  rest <- length(geometries_list) %% cores
+  
+  registerDoParallel(cores)
+  polygons <- foreach(j = 1:cores, .combine = c, .packages = 'concaveman') %dopar% {
+    poly_list <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    }
+    poly_list
+  }
+  stopImplicitCluster()
+  poly_df <- data.table::rbindlist(polygons)
+  poly_df
+}
+  
+
+```
+
+
+
+
+
+```{r creating isochrone for 7.5 minutes}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_500.RData')
+subset_geometries <- subset_geometries[55001:100000]
+#rm(subset_polygons)
+gc()
+
+# Bench marking
+## test with a function using do parallel: memory(32.2) time(4320) 
+# profvis::profvis({
+#   test<- create_poly(subset_geometries, cores = 6)
+# })
+# 
+# ## test with lapply: memory(222), time(15880)
+# profvis::profvis({
+#   registerDoParallel(6)
+#   subset_polygons <- foreach(geometries = subset_geometries, .combine = rbind) %dopar% {
+#   concaveman::concaveman(geometries)
+#   }
+#   stopImplicitCluster()
+# })
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/7m/subset_isochrone_500_2.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+```{r creating isochrone for 5 minutes}
+# read in dataa
+subset_geometries <- readRDS('subset_geometries_500.RData')
+subset_geometries <- subset_geometries[175001:length(subset_geometries)]
+#rm(subset_polygons)
+gc()
+
+# Bench marking
+## test with a function using do parallel: memory(32.2) time(4320) 
+# profvis::profvis({
+#   test<- create_poly(subset_geometries, cores = 6)
+# })
+# 
+# ## test with lapply: memory(222), time(15880)
+# profvis::profvis({
+#   registerDoParallel(6)
+#   subset_polygons <- foreach(geometries = subset_geometries, .combine = rbind) %dopar% {
+#   concaveman::concaveman(geometries)
+#   }
+#   stopImplicitCluster()
+# })
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+})
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/7m/subset_isochrone_500_5.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+
+
+### Isochrone for 100m
+```{r finding reachable nodes function}
+reachable_nodes_for_pois <- function(graph, data, lim = 100, cores = 1){
+  nodeID <- data$nodeID
+  chunks <- floor(length(nodeID) / cores)
+  rest <- length(nodeID) %% cores
+  
+  registerDoParallel(cores)
+  reachable_nodes <- foreach(j = 1:cores, .combine=c, .packages = 'cppRouting') %dopar% {
+    node_final <- list()
+    idx <- 1  # Counter for the index in the node_final list
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = 100)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = 100)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    }
+    node_final
+  }
+  stopImplicitCluster()
+  reachable_nodes
+}
+```
+
+```{r isochrone for pois 100m}
+# this code searches a set of nodes on graph that can be reached within 100m from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700)
+
+# select columns
+iso_points <- iso_points %>% select(c(12,13))
+
+# comparison - cores 7 is the best
+# test <- iso_points[1:1000,]
+# # profvis::profvis({
+# #   test_l <- lapply(test$nodeID, function(nodeID) {
+# #   get_isochrone(graph, from = nodeID, lim = 400)
+# # })
+# # })
+# profvis::profvis({
+#   test_p_4 <- reachable_nodes_for_pois(graph, test, lim = 100, cores = 4)
+# })
+# rm(test_p_4)
+gc()
+# apply a function
+profvis::profvis({
+  reachable_nodes_for_pois_100 <- reachable_nodes_for_pois(graph, iso_points, lim = 100, cores = 7)
+}) # 2h
+
+
+saveRDS(reachable_nodes_for_pois_100, file = 'reachable_nodes_for_pois_100.RData')
+#readRDS('reachable_nodes_for_pois_400.RData')
+
+rm(reachable_nodes_for_pois)
+```
+
+
+```{r finding geometries funciton}
+find_geometries <- function(graph, reachable_nodes_list, cores = 1) {
+  chunks <- floor(length(reachable_nodes_list) / cores)
+  rest <- length(reachable_nodes_list) %% cores
+  
+  registerDoParallel(cores)
+  geometries <- foreach(j = 1:cores, .combine = c, .packages = c('sf', 'dplyr')) %dopar% {
+    geom_final <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    }
+    geom_final
+  }
+  stopImplicitCluster()
+  geometries
+}
+
+```
+
+
+```{r find geometries of reachable nodes for pois 100m}
+# Read in the list of reachable nodes data
+#subset <- readRDS('reachable_nodes_for_pois_400.RData')
+rm(iso_points)
+# parallel processing
+gc()
+
+# parallel processing with lapply
+profvis::profvis({
+  geometries_100 <- find_geometries(graph, reachable_nodes_for_pois_100, cores = 6)
+})
+
+rm(reachable_nodes_for_pois_100)
+gc()
+
+saveRDS(geometries_100, file = 'geometries_100.RData')
+
+rm(geometries_100)
+gc()
+
+rm(graph)
+rm(find_geometries)
+gc()
+```
+
+```{r creating polygons function}
+# this function creates polygons from geometry of points and then return the output in the form of a sf dataframe
+create_poly <- function(geometries_list, cores = 1){
+  chunks <- floor(length(geometries_list) / cores)
+  rest <- length(geometries_list) %% cores
+  
+  registerDoParallel(cores)
+  polygons <- foreach(j = 1:cores, .combine = c, .packages = 'concaveman') %dopar% {
+    poly_list <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    }
+    poly_list
+  }
+  stopImplicitCluster()
+  poly_df <- data.table::rbindlist(polygons)
+  poly_df
+}
+  
+
+```
+
+
+```{r creating isochrone for 1 minutes}
+# read in dataa
+subset_geometries <- readRDS('geometries_100.RData')
+#ubset_geometries <- subset_geometries[1:65000]
+#rm(subset_polygons)
+gc()
+
+# Bench marking
+## test with a function using do parallel: memory(32.2) time(4320) 
+# profvis::profvis({
+#   test<- create_poly(subset_geometries, cores = 6)
+# })
+# 
+# ## test with lapply: memory(222), time(15880)
+# profvis::profvis({
+#   registerDoParallel(6)
+#   subset_polygons <- foreach(geometries = subset_geometries, .combine = rbind) %dopar% {
+#   concaveman::concaveman(geometries)
+#   }
+#   stopImplicitCluster()
+# })
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+}) #211320
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/1m/subset_isochrone_100.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+
+
+### Isochrone for 200m
+```{r finding reachable nodes function}
+reachable_nodes_for_pois <- function(graph, data, lim = 200, cores = 1){
+  nodeID <- data$nodeID
+  chunks <- floor(length(nodeID) / cores)
+  rest <- length(nodeID) %% cores
+  
+  registerDoParallel(cores)
+  reachable_nodes <- foreach(j = 1:cores, .combine=c, .packages = 'cppRouting') %dopar% {
+    node_final <- list()
+    idx <- 1  # Counter for the index in the node_final list
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = 200)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        nodes <- get_isochrone(graph, from = nodeID[i], lim = 200)
+        node_final[[idx]] <- nodes
+        idx <- idx + 1
+      }
+    }
+    node_final
+  }
+  stopImplicitCluster()
+  reachable_nodes
+}
+```
+
+```{r isochrone for pois 200m}
+# this code searches a set of nodes on graph that can be reached within 200m from a given node
+#iso_points <- iso_points$nodeID
+iso_points <- st_read(here::here('data', 'projected_on_graph', 'pois_projected_on_graph.geojson')) %>% st_transform(27700)
+
+# select columns
+iso_points <- iso_points %>% select(c(12,13))
+
+# comparison - cores 7 is the best
+# test <- iso_points[1:1000,]
+# # profvis::profvis({
+# #   test_l <- lapply(test$nodeID, function(nodeID) {
+# #   get_isochrone(graph, from = nodeID, lim = 400)
+# # })
+# # })
+# profvis::profvis({
+#   test_p_4 <- reachable_nodes_for_pois(graph, test, lim = 100, cores = 4)
+# })
+# rm(test_p_4)
+gc()
+# apply a function
+profvis::profvis({
+  reachable_nodes_for_pois_200 <- reachable_nodes_for_pois(graph, iso_points, lim = 200, cores = 7)
+}) # 2h
+
+
+saveRDS(reachable_nodes_for_pois_200, file = 'reachable_nodes_for_pois_200.RData')
+#readRDS('reachable_nodes_for_pois_400.RData')
+
+rm(reachable_nodes_for_pois)
+```
+
+
+```{r finding geometries funciton}
+find_geometries <- function(graph, reachable_nodes_list, cores = 1) {
+  chunks <- floor(length(reachable_nodes_list) / cores)
+  rest <- length(reachable_nodes_list) %% cores
+  
+  registerDoParallel(cores)
+  geometries <- foreach(j = 1:cores, .combine = c, .packages = c('sf', 'dplyr')) %dopar% {
+    geom_final <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+        isochrone <- reachable_nodes_list[[i]]
+        nodeIDs <- unlist(isochrone)
+        geoms <- graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+          st_as_sf(coords = c('X', 'Y'), crs = 27700)
+        geom_final[[idx]] <- geoms
+        idx <- idx + 1
+      }
+    }
+    geom_final
+  }
+  stopImplicitCluster()
+  geometries
+}
+
+```
+
+
+```{r find geometries of reachable nodes for pois 200m}
+# Read in the list of reachable nodes data
+#subset <- readRDS('reachable_nodes_for_pois_400.RData')
+rm(iso_points)
+# parallel processing
+gc()
+
+# parallel processing with lapply
+profvis::profvis({
+  geometries_200 <- find_geometries(graph, reachable_nodes_for_pois_200, cores = 6)
+})
+
+rm(reachable_nodes_for_pois_200)
+gc()
+
+saveRDS(geometries_200, file = 'geometries_200.RData')
+
+rm(geometries_200)
+gc()
+
+rm(graph)
+rm(find_geometries)
+gc()
+```
+
+```{r creating polygons function}
+# this function creates polygons from geometry of points and then return the output in the form of a sf dataframe
+create_poly <- function(geometries_list, cores = 1){
+  chunks <- floor(length(geometries_list) / cores)
+  rest <- length(geometries_list) %% cores
+  
+  registerDoParallel(cores)
+  polygons <- foreach(j = 1:cores, .combine = c, .packages = 'concaveman') %dopar% {
+    poly_list <- list()
+    idx <- 1
+    if (j < cores) {
+      for (i in (((j-1) * chunks) + 1):(j * chunks)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    } else {
+      for (i in (((j-1) * chunks) + 1):(j * chunks + rest)) {
+       poly <- concaveman::concaveman(geometries_list[[i]])
+       poly_list[[idx]] <- poly 
+       idx <- idx + 1
+      }
+    }
+    poly_list
+  }
+  stopImplicitCluster()
+  poly_df <- data.table::rbindlist(polygons)
+  poly_df
+}
+  
+
+```
+
+
+```{r creating isochrone for 1 minutes}
+# read in dataa
+subset_geometries <- readRDS('geometries_200.RData')
+#ubset_geometries <- subset_geometries[1:65000]
+#rm(subset_polygons)
+gc()
+
+# Bench marking
+## test with a function using do parallel: memory(32.2) time(4320) 
+# profvis::profvis({
+#   test<- create_poly(subset_geometries, cores = 6)
+# })
+# 
+# ## test with lapply: memory(222), time(15880)
+# profvis::profvis({
+#   registerDoParallel(6)
+#   subset_polygons <- foreach(geometries = subset_geometries, .combine = rbind) %dopar% {
+#   concaveman::concaveman(geometries)
+#   }
+#   stopImplicitCluster()
+# })
+
+# apply function
+profvis::profvis({
+  subset_polygons <- create_poly(subset_geometries, cores = 6)
+}) #211320
+
+rm(subset_geometries)
+gc()
+
+# Save the subset sf object as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/1m/subset_isochrone_200.geojson'
+st_write(subset_polygons, file_path, driver = "GeoJSON")
+
+rm(subset_polygons)
+gc()
+```
+
+
+### rbind subset polygons
+```{r rbind the data subsets}
+# Directory path
+directory <- "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m"
+
+# Get the file names of the GeoJSON files in the directory
+file_names <- list.files(directory, pattern = ".geojson$", full.names = TRUE)
+
+# Read the GeoJSON files and combine them using rbind
+sf_df <- do.call(rbind, lapply(file_names, st_read))
+
+# Check if geometries in sf_df are valid
+sum(st_is_valid(sf_df))
+validity <- st_is_valid(sf_df)
+sf_df <- sf_df[validity, ]
+
+st_make_valid(sf_df)
+
+# Save the final isochrone data as a GeoJSON file
+file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/isochrone/700m/london_amenity_isochrone_700.geojson'
+st_write(sf_df, file_path, driver = "GeoJSON")
+
+```
+
+
+
+
+

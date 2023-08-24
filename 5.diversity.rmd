@@ -1,0 +1,439 @@
+---
+title: "diversity"
+output: html_document
+date: "2023-07-18"
+---
+
+## Packages
+```{r packages}
+# packages
+library(data.table)
+library(doParallel)
+library(RcppParallel)
+library(sf)
+library(here)
+library(tmap)
+library(dplyr)
+library(tibble)
+library(sp)
+library(tidyverse)
+library(purrr)
+library(foreach) # for parallel computing
+library(profvis)
+library(concaveman)
+gc()
+```
+
+## Isochrone - 400m
+```{r read in data}
+# read in data
+nb_entropy <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_400.geojson')) %>% select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 'GSS_CODE', 'entropy', 'size')) %>% st_transform(., 27700)
+
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_400.geojson')) %>% st_transform(27700)
+
+#amenities <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(27700)
+```
+
+```{r}
+gc()
+```
+
+
+
+```{r number of amenity check}
+# check whether number of each amenity service sums up to the total number
+num_living_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity) 
+
+num_commerce_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num_nb <- nb_entropy %>% distinct(amenity)
+
+rm(num_nb, num_commerce_nb, num_edu_nb, num_entertainment_nb, num_health_nb, num_living_nb)
+gc()
+```
+
+
+
+
+
+```{r entropy calculation}
+library(dplyr)
+# read in data
+nb_entropy <- st_read(here::here('data', 'neighbourhood', 'filtered_neighbourhoods_400.geojson')) %>% select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 'GSS_CODE', 'entropy', 'size')) %>% st_transform(., 27700)
+
+# group by cluster, 15minute service and amenity
+diversity <- nb_entropy %>%
+  group_by(nb_clus, X15minute_6_urban_service, amenity) %>% 
+  summarise(counted = n())
+
+# Calculate Shannon's entropy for each nb_clus and X15minute_6_urban_service combination
+nb_entropy <- diversity %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  mutate(probability = counted / sum(counted),
+         entropy = -sum(probability * log(probability))) %>%
+  distinct(nb_clus, X15minute_6_urban_service, .keep_all = TRUE) %>%
+  select(nb_clus, X15minute_6_urban_service, entropy)
+
+min(nb_entropy$entropy)
+
+# Replace 0 values with 0.0000001
+#nb_entropy <- nb_entropy %>% 
+#  mutate(entropy = ifelse(entropy == 0, 0.0000001, entropy))
+```
+
+
+```{r data format change}
+# convert data format to a wide one
+# Pivot the table from long to wide format
+test <- nb_entropy %>% st_drop_geometry()
+
+nb_entropy_wide <- test %>%
+  pivot_wider(names_from = X15minute_6_urban_service, values_from = entropy, names_prefix = "") %>%
+  rename(d_c = Commerce, d_l = Living, d_edu = Education,
+         d_enter = Entertainment, d_h = Healthcare)
+
+# left_join with nb_polygon
+# nb_entropy_wide <- nb_entropy_wide %>%
+#   left_join(.,
+#             nb_polygon,
+#             by = 'nb_clus')
+
+
+# Save the dataframe as a CSV file
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/diversity_400.csv"
+st_write(nb_entropy_wide, file_path, row.names = FALSE)
+
+```
+
+
+
+
+## Isochrone - 500m whole dataset
+```{r read in data}
+nb_entropy <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_500.geojson')) %>% select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 'GSS_CODE', 'entropy', 'size')) %>% st_transform(., 27700)
+
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+
+```
+
+```{r}
+gc()
+```
+
+
+
+```{r number of amenity check}
+# check whether number of each amenity service sums up to the total number
+num_living_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity) 
+
+num_commerce_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num_nb <- nb_entropy %>% distinct(amenity)
+
+rm(num_nb, num_commerce_nb, num_edu_nb, num_entertainment_nb, num_health_nb, num_living_nb)
+gc()
+```
+
+
+
+
+
+```{r entropy calculation}
+# group by cluster, 15minute service and amenity
+diversity <- nb_entropy %>%
+  group_by(nb_clus, X15minute_6_urban_service, amenity) %>% 
+  summarise(counted = n())
+
+## save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/500m/grouped_data_whole_500.geojson"
+# 
+# st_write(diversity, file_path, driver = 'GeoJSON')
+
+
+
+
+# separate diversity based on the number of counts
+## point data
+diversity_point <- diversity %>% 
+  filter(counted == 1)
+
+## save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/500m/grouped_data_whole_500_point.geojson"
+# 
+# st_write(diversity_point, file_path, driver = 'GeoJSON')
+
+## check out the saved data
+# test <- st_read(here::here('data', 'neighbourhood', 'proximity', '400m_whole', 'grouped_data_whole_400_point.geojson')) %>% st_transform(27700)
+
+
+
+## multipoint
+diversity_multipoint <- diversity %>%
+  filter(counted != 1)
+
+## save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/500m/grouped_data_whole_500_multipoint.geojson"
+# 
+# st_write(diversity_multipoint, file_path, driver = 'GeoJSON')
+
+
+
+
+# diversity_test <- st_read(here::here('data', 'neighbourhood', 'proximity', '400m_whole', 'grouped_data_whole_400.geojson')) %>% st_transform(27700)
+
+
+# Calculate Shannon's entropy for each nb_clus and X15minute_6_urban_service combination
+# nb_entropy <- diversity %>%
+#   group_by(nb_clus, X15minute_6_urban_service) %>%
+#   mutate(probability = counted / sum(counted),
+#          entropy = -sum(probability * log(probability))) %>%
+#   distinct(nb_clus, X15minute_6_urban_service, .keep_all = TRUE) %>%
+#   select(nb_clus, X15minute_6_urban_service, entropy)
+
+
+# entropy calculation 
+# the smallest entropy value is 0 when there is only one kind of amenity
+# to differentiate between an area with only one amenity for that specific urban service category and an area with no amenities at all,
+# A neighbourhood with no amenities will be assigned a score of -1, while a neighbourhood with only one kind of amenity will get a score of 0 following the entropy equation
+
+nb_entropy <- diversity %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  mutate(total_count = sum(counted)) %>%
+  mutate(probability = counted / sum(counted),
+         entropy = -sum(probability * log(probability))) %>%
+  distinct(nb_clus, X15minute_6_urban_service, .keep_all = TRUE) %>%
+  select(nb_clus, X15minute_6_urban_service, entropy)
+
+min(nb_entropy$entropy) # 0
+max(nb_entropy$entropy) # 3.88
+
+
+#Sensitivity Analysis: Perform a sensitivity analysis to see how sensitive your results are to different epsilon values. Try running your analysis with different epsilon values (e.g., 0.00001, 0.0001, 0.001) 
+```
+
+
+```{r data format change}
+# convert data format to a wide one
+# Pivot the table from long to wide format
+test <- nb_entropy %>% st_drop_geometry()
+
+nb_entropy_wide <- test %>%
+  pivot_wider(names_from = X15minute_6_urban_service, values_from = entropy, names_prefix = "") %>%
+  rename(d_c = Commerce, d_l = Living, d_edu = Education,
+         d_enter = Entertainment, d_h = Healthcare) 
+
+# fill NA values with -1
+# those neighbourhoods which do not have amenities on specific urban service categories
+# will be given a diversity value of zero
+nb_entropy_wide <- replace(nb_entropy_wide, is.na(nb_entropy_wide), -1) 
+nb_entropy_wide <- nb_entropy_wide %>% select(-Other)
+
+
+# left_join with nb_polygon
+# nb_entropy_wide <- nb_entropy_wide %>%
+#   left_join(.,
+#             nb_polygon,
+#             by = 'nb_clus')
+
+# Save the dataframe as a CSV file
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/500m/diversity_500.csv"
+st_write(nb_entropy_wide, file_path, row.names = FALSE)
+
+# Save the dataframe with null values as a CSV file
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/500m/diversity_500_null.csv"
+st_write(nb_entropy_wide, file_path, row.names = FALSE)
+
+```
+
+## Isochrone - 600m whole dataset
+```{r read in data}
+nb_entropy <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_600.geojson')) %>% select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 'GSS_CODE', 'entropy', 'size')) %>% st_transform(., 27700)
+
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_600.geojson')) %>% st_transform(27700)
+
+```
+
+```{r}
+gc()
+```
+
+
+
+```{r number of amenity check}
+# check whether number of each amenity service sums up to the total number
+num_living_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Living') %>%
+  distinct(amenity) 
+
+num_commerce_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Commerce') %>%
+  distinct(amenity)
+
+num_health_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') %>%
+  distinct(amenity)
+
+num_edu_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Education') %>%
+  distinct(amenity)
+
+num_entertainment_nb <- nb_entropy %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') %>%
+  distinct(amenity)
+
+num_nb <- nb_entropy %>% distinct(amenity)
+
+rm(num_nb, num_commerce_nb, num_edu_nb, num_entertainment_nb, num_health_nb, num_living_nb)
+gc()
+```
+
+
+
+
+
+```{r entropy calculation}
+
+# group by cluster, 15minute service and amenity
+diversity <- nb_entropy %>%
+  group_by(nb_clus, X15minute_6_urban_service, amenity) %>% 
+  summarise(counted = n())
+
+## save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/600m/grouped_data_whole_600.geojson"
+# 
+# st_write(diversity, file_path, driver = 'GeoJSON')
+
+
+
+
+# separate diversity based on the number of counts
+## point data
+diversity_point <- diversity %>% 
+  filter(counted == 1)
+
+## save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/600m/grouped_data_whole_600_point.geojson"
+# 
+# st_write(diversity_point, file_path, driver = 'GeoJSON')
+
+## check out the saved data
+# test <- st_read(here::here('data', 'neighbourhood', 'proximity', '400m_whole', 'grouped_data_whole_400_point.geojson')) %>% st_transform(27700)
+
+
+
+## multipoint
+diversity_multipoint <- diversity %>%
+  filter(counted != 1)
+
+## save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/600m/grouped_data_whole_600_multipoint.geojson"
+# 
+# st_write(diversity_multipoint, file_path, driver = 'GeoJSON')
+
+
+
+
+# diversity_test <- st_read(here::here('data', 'neighbourhood', 'proximity', '400m_whole', 'grouped_data_whole_400.geojson')) %>% st_transform(27700)
+
+
+# Calculate Shannon's entropy for each nb_clus and X15minute_6_urban_service combination
+# nb_entropy <- diversity %>%
+#   group_by(nb_clus, X15minute_6_urban_service) %>%
+#   mutate(probability = counted / sum(counted),
+#          entropy = -sum(probability * log(probability))) %>%
+#   distinct(nb_clus, X15minute_6_urban_service, .keep_all = TRUE) %>%
+#   select(nb_clus, X15minute_6_urban_service, entropy)
+
+
+# entropy calculation 
+# Set the value of epsilon
+# the data is in meter
+# an epsilon value of 0.0001 (which corresponds to 0.0001 meter) is a very small distance 
+# and can be considered as a reasonable choice. 
+# This small value ensures that even if there is only one amenity of a particular type 
+# in a neighborhood, it still contributes to the diversity score, and the entropy does not become zero.
+# epsilon is still small relative to the scale of the data but large enough to effectively differentiate neighborhoods with no amenities.
+epsilon <- 0.0001
+
+nb_entropy <- diversity %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  mutate(total_count = sum(counted)) %>%
+  mutate(probability = counted / sum(counted),
+         entropy = -sum(probability * log(probability))) %>%
+  distinct(nb_clus, X15minute_6_urban_service, .keep_all = TRUE) %>%
+  select(nb_clus, X15minute_6_urban_service, entropy)
+
+
+min(nb_entropy$entropy) # 0
+max(nb_entropy$entropy) # 3.81
+#sort(nb_entropy$entropy)[2]
+
+#Sensitivity Analysis: Perform a sensitivity analysis to see how sensitive your results are to different epsilon values. Try running your analysis with different epsilon values (e.g., 0.00001, 0.0001, 0.001) 
+```
+
+
+```{r data format change}
+# convert data format to a wide one
+# Pivot the table from long to wide format
+test <- nb_entropy %>% st_drop_geometry()
+
+nb_entropy_wide <- test %>%
+  pivot_wider(names_from = X15minute_6_urban_service, values_from = entropy, names_prefix = "") %>%
+  rename(d_c = Commerce, d_l = Living, d_edu = Education,
+         d_enter = Entertainment, d_h = Healthcare) 
+
+# fill NA values with -1
+# those neighbourhoods which do not have amenities on specific urban service categories
+# will be given a diversity value of 01
+nb_entropy_wide <- replace(nb_entropy_wide, is.na(nb_entropy_wide), -1) 
+nb_entropy_wide <- nb_entropy_wide %>% select(-Other)
+
+
+# left_join with nb_polygon
+# nb_entropy_wide <- nb_entropy_wide %>%
+#   left_join(.,
+#             nb_polygon,
+#             by = 'nb_clus')
+
+# Save the dataframe as a CSV file
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/600m/diversity_600.csv"
+st_write(nb_entropy_wide, file_path, row.names = FALSE)
+
+
+# Save the dataframe with null values as a CSV file
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/diversity/600m/diversity_600_null.csv"
+st_write(nb_entropy_wide, file_path, row.names = FALSE)
+
+```

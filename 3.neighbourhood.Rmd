@@ -1,0 +1,659 @@
+---
+title: "Constructing neighbourhoods"
+author: "phil"
+date: "2023-06-21"
+output: html_document
+---
+
+## Packages
+```{r essential packages}
+#install.packages('stplanr', repos="http://cran.r-project.org")
+library(sf)
+library(tidyverse)
+library(dplyr)
+library(here)
+library(doParallel)
+library(foreach)
+library(stplanr)
+# performance monitoring
+library(profvis)
+library(concaveman)
+library(data.table)
+# map
+library(tmap)
+```
+
+
+```{r memory usage}
+gc()
+gcinfo(TRUE)
+```
+# 700m
+```{r}
+neighbourhoods_iso_3 <- function(data,iso, cores = 1) {
+  # pass data here in 27700 CRS
+  # make sure that the isochrones data is perfectly aligned by row with the data.
+  int <- sf::st_intersects(iso, data)
+  checks <- map(int,length) %>% unlist() %>% tibble()
+  # when the intersection is zero, we impose that there is just the amenity for which the isochrone is computed
+  bad_values <- which(checks$. == 0)
+  # put the index of the amenity itself in the intersection
+  int[bad_values] <- bad_values
+  data$ind <- 1:nrow(data)
+  #data <- as.data.table(data)
+  chunks <- floor(nrow(data)/cores)
+  print(chunks)
+  rest <- nrow(data) %% cores
+  
+  registerDoParallel(cores)
+  max <- foreach(j = 1:cores, .combine = c, .packages = 'dplyr') %dopar% {
+    #m_final <- vector(mode = 'numeric') # this is going to a set of indices for given chunks, a vector of values
+    m_final <- c()
+    print(class(m_final))
+    if (j < cores){
+      for(i in (((j-1)*chunks)+1):(j*chunks)) {
+        # retrieve actual index of data, iterate over each row of datasets
+        nb <- data[int[[i]],]
+        indice <- i
+        m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        it <- 0
+        while(m != indice & it <= 1000) {
+          it <- it + 1
+          nb <- data[int[[m]],]
+          indice <- m
+          m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        }
+        m_final <- append(m_final, m) 
+      }
+      m_final
+      }
+    else {
+      for (i in (((j-1)*chunks)+1):(j*chunks + rest)) {
+         nb <- data[int[[i]],]
+        indice <- i
+        m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        it <- 0
+        while(m != indice & it <= 1000) {
+          it <- it + 1
+          nb <- data[int[[m]],]
+          indice <- m
+          m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        }
+        m_final <- append(m_final, m) 
+      }
+      m_final
+      }
+    }
+  stopImplicitCluster()
+  max
+} 
+```
+
+
+
+```{r data}
+london_entropy_iso <- st_read(here::here('data', 'entropy', 'london_entropy_iso_700.geojson')) %>% st_transform(27700)
+
+isochrone <- st_read(here::here('data', 'isochrone', '700m', 'london_amenity_isochrone_700.geojson')) %>% st_transform(27700)
+
+
+```
+
+```{r check validity}
+st_make_valid(london_entropy_iso)
+st_make_valid(isochrone)
+sum(st_is_valid(isochrone))
+```
+
+
+```{r neighbourhood formation}
+profvis::profvis({
+  
+  nb_cluster <- neighbourhoods_iso_3(london_entropy_iso, isochrone, cores = 6)
+})
+gc()
+
+london_entropy_iso$nb_clus <- nb_cluster
+length(unique(nb_cluster)) # 4966 neighbourhoods
+```
+
+```{r filter neigihbourhoods that contain more than 5 points}
+# combined amenities by neighbourhood with count
+
+amenities_combined <- london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  summarize(combined = st_combine(geometry), number = n()) %>% 
+  st_centroid()
+
+amenities_combined_filtered <- amenities_combined %>%
+  filter(number >=5) # 1783 neighbourhoods
+
+# Filter the nb_clus values from amenities_combined_filtered
+selected_nb_clus <- amenities_combined_filtered$nb_clus
+
+# Filter the original data based on selected_nb_clus
+filtered_london_entropy_iso <- london_entropy_iso %>%
+  filter(nb_clus %in% selected_nb_clus)
+  
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_700.geojson'
+# # 
+# st_write(filtered_london_entropy_iso, file_path, driver = 'geojson')
+
+# read in 700m neighbourhood
+filtered_london_entropy_iso <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_700.geojson')) %>% st_transform(27700)
+
+# neighbourhoods from concave hulls enveloping the amenities of a single neighbourhood
+
+neighbourhoods_iso_hull <- filtered_london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  group_modify(.,concaveman,concavity = 1) %>% 
+  rename(geometry = polygons) %>% 
+  st_sf() %>% 
+  st_make_valid()
+
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_polygon_700.geojson'
+# # 
+# st_write(neighbourhoods_iso_hull, file_path, driver = 'geojson')
+
+# read in nb_polygon_700
+neighbourhoods_iso_hull <- st_read(here::here('data' ,'neighbourhood', 'whole_neighbourhoods_polygon_700.geojson')) %>% st_transform(27700)
+```
+
+```{r map making}
+# read in road data
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+
+
+# neighbourhood concave hulls
+london_neighbourhoods_artsy <- tm_shape(edges) + tm_lines(col="black"
+                                  ,alpha = 0.3
+                           ) +
+  tm_shape(neighbourhoods_iso_hull) + tm_fill(col= "MAP_COLORS"
+                                              ,palette = "Set1"
+                                              ,alpha = .8
+                                              ,style = "cat"
+                                              ) +
+  tm_compass(type = "arrow", position = c('right', 'top'), size = 3) +
+  tm_layout(legend.show = FALSE,
+            main.title = "203 Mixed Urban Amenity Neighbourhoods in London",
+            main.title.position = 'center',
+            #main.title.fontface = 'bold',
+            main.title.size = 3,
+            frame = FALSE) +
+  tm_scale_bar(text.size = 0.9, position = c('left', 'bottom'))
+
+#london_neighbourhoods_artsy
+
+tmap_save(london_neighbourhoods_artsy
+          ,"whole_neighbourhoods_iso_pretty_700_10000-it.pdf"
+          ,height = 20
+          ,width = 16)
+```
+
+# 600m
+```{r}
+neighbourhoods_iso_3 <- function(data,iso, cores = 1) {
+  # pass data here in 27700 CRS
+  # make sure that the isochrones data is perfectly aligned by row with the data.
+  int <- sf::st_intersects(iso, data)
+  checks <- map(int,length) %>% unlist() %>% tibble()
+  # when the intersection is zero, we impose that there is just the amenity for which the isochrone is computed
+  bad_values <- which(checks$. == 0)
+  # put the index of the amenity itself in the intersection
+  int[bad_values] <- bad_values
+  data$ind <- 1:nrow(data)
+  #data <- as.data.table(data)
+  chunks <- floor(nrow(data)/cores)
+  print(chunks)
+  rest <- nrow(data) %% cores
+  
+  registerDoParallel(cores)
+  max <- foreach(j = 1:cores, .combine = c, .packages = 'dplyr') %dopar% {
+    #m_final <- vector(mode = 'numeric') # this is going to a set of indices for given chunks, a vector of values
+    m_final <- c()
+    print(class(m_final))
+    if (j < cores){
+      for(i in (((j-1)*chunks)+1):(j*chunks)) {
+        # retrieve actual index of data, iterate over each row of datasets
+        nb <- data[int[[i]],]
+        indice <- i
+        m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        it <- 0
+        while(m != indice & it <= 1000) {
+          it <- it + 1
+          nb <- data[int[[m]],]
+          indice <- m
+          m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        }
+        m_final <- append(m_final, m) 
+      }
+      m_final
+      }
+    else {
+      for (i in (((j-1)*chunks)+1):(j*chunks + rest)) {
+         nb <- data[int[[i]],]
+        indice <- i
+        m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        it <- 0
+        while(m != indice & it <= 1000) {
+          it <- it + 1
+          nb <- data[int[[m]],]
+          indice <- m
+          m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        }
+        m_final <- append(m_final, m) 
+      }
+      m_final
+      }
+    }
+  stopImplicitCluster()
+  max
+} 
+```
+
+
+
+```{r data}
+london_entropy_iso <- st_read(here::here('data', 'entropy', 'london_entropy_iso_600.geojson')) %>% st_transform(27700)
+
+isochrone <- st_read(here::here('data', 'isochrone', '600m', 'london_amenity_isochrone_600.geojson')) %>% st_transform(27700)
+```
+
+```{r check validity}
+st_make_valid(london_entropy_iso)
+st_make_valid(isochrone)
+sum(st_is_valid(isochrone))
+```
+
+
+```{r neighbourhood formation}
+profvis::profvis({
+  
+  nb_cluster <- neighbourhoods_iso_3(london_entropy_iso, isochrone, cores = 6)
+})
+gc()
+
+london_entropy_iso$nb_clus <- nb_cluster
+length(unique(nb_cluster)) # 1612 neighbourhoods
+```
+
+```{r filter neigihbourhoods that contain more than 5 points}
+# combined amenities by neighbourhood with count
+
+amenities_combined <- london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  summarize(combined = st_combine(geometry), number = n()) %>% 
+  st_centroid()
+
+amenities_combined_filtered <- amenities_combined %>%
+  filter(number >=5) # 1783 neighbourhoods
+
+# Filter the nb_clus values from amenities_combined_filtered
+selected_nb_clus <- amenities_combined_filtered$nb_clus
+
+# Filter the original data based on selected_nb_clus
+filtered_london_entropy_iso <- london_entropy_iso %>%
+  filter(nb_clus %in% selected_nb_clus)
+  
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_600.geojson'
+# # 
+# st_write(filtered_london_entropy_iso, file_path, driver = 'geojson')
+
+# read in 600m neighbourhood
+filtered_london_entropy_iso <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_600.geojson')) %>% st_transform(27700)
+
+
+# neighbourhoods from concave hulls enveloping the amenities of a single neighbourhood
+
+neighbourhoods_iso_hull <- filtered_london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  group_modify(.,concaveman,concavity = 1) %>% 
+  rename(geometry = polygons) %>% 
+  st_sf() %>% 
+  st_make_valid()
+
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_polygon_600.geojson'
+# # 
+# st_write(neighbourhoods_iso_hull, file_path, driver = 'geojson')
+
+# read in nb_polygon_600
+neighbourhoods_iso_hull <- st_read(here::here('data' ,'neighbourhood', 'whole_neighbourhoods_polygon_600.geojson')) %>% st_transform(27700)
+```
+
+```{r map making}
+# read in road data
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+
+# Calculate the count of rows in neighbourhoods_iso_hull
+count_neighbourhoods <- nrow(neighbourhoods_iso_hull)
+
+# Create the title with the count
+title <- paste(count_neighbourhoods, " Mixed Urban Amenity Neighbourhoods in London")
+
+# neighbourhood concave hulls
+london_neighbourhoods_artsy <- tm_shape(edges) + tm_lines(col="black"
+                                  ,alpha = 0.3
+                           ) +
+  tm_shape(neighbourhoods_iso_hull) + tm_fill(col= "MAP_COLORS"
+                                              ,palette = "Set1"
+                                              ,alpha = .8
+                                              ,style = "cat"
+                                              ) +
+  tm_compass(type = "arrow", position = c('right', 'top'), size = 3) +
+  tm_layout(legend.show = FALSE,
+            main.title = "864 Mixed Urban Amenity Neighbourhoods in London",
+            main.title.position = 'center',
+            #main.title.fontface = 'bold',
+            main.title.size = 3,
+            frame = FALSE) +
+  tm_scale_bar(text.size = 0.9, position = c('left', 'bottom'))
+
+#london_neighbourhoods_artsy
+
+tmap_save(london_neighbourhoods_artsy
+          ,"whole_neighbourhoods_iso_pretty_600_10000-it.pdf"
+          ,height = 20
+          ,width = 16)
+```
+
+
+# 500m
+```{r data}
+london_entropy_iso <- st_read(here::here('data', 'entropy', 'london_entropy_iso_500.geojson')) %>% st_transform(27700)
+
+isochrone <- st_read(here::here('data', 'isochrone', '500m', 'london_amenity_isochrone_500.geojson')) %>% st_transform(27700)
+```
+
+```{r check validity}
+st_make_valid(london_entropy_iso)
+st_make_valid(isochrone)
+sum(st_is_valid(isochrone))
+```
+
+
+```{r neighbourhood formation}
+profvis::profvis({
+  
+  nb_cluster <- neighbourhoods_iso_3(london_entropy_iso, isochrone, cores = 6)
+})
+gc()
+
+london_entropy_iso$nb_clus <- nb_cluster
+length(unique(nb_cluster)) # 1612 neighbourhoods
+```
+
+```{r filter neigihbourhoods that contain more than 5 points}
+# combined amenities by neighbourhood with count
+
+amenities_combined <- london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  summarize(combined = st_combine(geometry), number = n()) %>% 
+  st_centroid()
+
+amenities_combined_filtered <- amenities_combined %>%
+  filter(number >=5) # 1209 neighbourhoods
+
+# Filter the nb_clus values from amenities_combined_filtered
+selected_nb_clus <- amenities_combined_filtered$nb_clus
+
+# Filter the original data based on selected_nb_clus
+filtered_london_entropy_iso <- london_entropy_iso %>%
+  filter(nb_clus %in% selected_nb_clus)
+  
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_500.geojson'
+# # 
+# st_write(filtered_london_entropy_iso, file_path, driver = 'geojson')
+
+# neighbourhoods from concave hulls enveloping the amenities of a single neighbourhood
+
+neighbourhoods_iso_hull <- filtered_london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  group_modify(.,concaveman,concavity = 1) %>% 
+  rename(geometry = polygons) %>% 
+  st_sf() %>% 
+  st_make_valid()
+
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_polygon_500.geojson'
+# # 
+# st_write(neighbourhoods_iso_hull, file_path, driver = 'geojson')
+
+# read in nb_polygon_500
+neighbourhoods_iso_hull <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+```
+
+```{r map making}
+# read in road data
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+
+# neighbourhood concave hulls
+london_neighbourhoods_artsy <- tm_shape(edges) + tm_lines(col="black"
+                                  ,alpha = 0.3
+                           ) +
+  tm_shape(neighbourhoods_iso_hull) + tm_fill(col= "MAP_COLORS"
+                                              ,palette = "Set1"
+                                              ,alpha = .8
+                                              ,style = "cat"
+                                              ) +
+  tm_compass(type = "arrow", position = c('right', 'top'), size = 3) +
+  tm_layout(legend.show = FALSE,
+            main.title = "1209 Mixed Urban Amenity Neighbourhoods in London",
+            main.title.position = 'center',
+            #main.title.fontface = 'bold',
+            main.title.size = 3,
+            frame = FALSE) +
+  tm_scale_bar(text.size = 0.9, position = c('left', 'bottom'))
+
+tmap_save(london_neighbourhoods_artsy
+          ,"whole_neighbourhoods_iso_pretty_500_1000-it.pdf"
+          ,height = 20
+          ,width = 16)
+```
+# 400m
+```{r}
+neighbourhoods_iso_3 <- function(data,iso, cores = 1) {
+  # pass data here in 27700 CRS
+  # make sure that the isochrones data is perfectly aligned by row with the data.
+  int <- sf::st_intersects(iso, data)
+  checks <- map(int,length) %>% unlist() %>% tibble()
+  # when the intersection is zero, we impose that there is just the amenity for which the isochrone is computed
+  bad_values <- which(checks$. == 0)
+  # put the index of the amenity itself in the intersection
+  int[bad_values] <- bad_values
+  data$ind <- 1:nrow(data)
+  #data <- as.data.table(data)
+  chunks <- floor(nrow(data)/cores)
+  print(chunks)
+  rest <- nrow(data) %% cores
+  
+  registerDoParallel(cores)
+  max <- foreach(j = 1:cores, .combine = c, .packages = 'dplyr') %dopar% {
+    #m_final <- vector(mode = 'numeric') # this is going to a set of indices for given chunks, a vector of values
+    m_final <- c()
+    print(class(m_final))
+    if (j < cores){
+      for(i in (((j-1)*chunks)+1):(j*chunks)) {
+        # retrieve actual index of data, iterate over each row of datasets
+        nb <- data[int[[i]],]
+        indice <- i
+        m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        it <- 0
+        while(m != indice & it <= 10000) {
+          it <- it + 1
+          nb <- data[int[[m]],]
+          indice <- m
+          m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        }
+        m_final <- append(m_final, m) 
+      }
+      m_final
+      }
+    else {
+      for (i in (((j-1)*chunks)+1):(j*chunks + rest)) {
+         nb <- data[int[[i]],]
+        indice <- i
+        m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        it <- 0
+        while(m != indice & it <= 10000) {
+          it <- it + 1
+          nb <- data[int[[m]],]
+          indice <- m
+          m <- nb$ind[which(max(nb$entropy) == nb$entropy)[1]]
+        }
+        m_final <- append(m_final, m) 
+      }
+      m_final
+      }
+    }
+  stopImplicitCluster()
+  max
+} 
+```
+
+
+
+```{r data}
+london_entropy_iso <- st_read(here::here('data', 'entropy', 'london_entropy_iso_400.geojson')) %>% st_transform(27700)
+
+isochrone <- st_read(here::here('data', 'isochrone', '5m', 'london_amenity_isochrone_400.geojson')) %>% st_transform(27700)
+```
+
+```{r check validity}
+st_make_valid(london_entropy_iso)
+st_make_valid(isochrone)
+sum(st_is_valid(isochrone))
+```
+
+
+```{r neighbourhood formation}
+profvis::profvis({
+  
+  nb_cluster <- neighbourhoods_iso_3(london_entropy_iso, isochrone, cores = 6)
+})
+gc()
+
+london_entropy_iso$nb_clus <- nb_cluster
+length(unique(nb_cluster)) # 4966 neighbourhoods
+```
+
+```{r filter neigihbourhoods that contain more than 5 points}
+# combined amenities by neighbourhood with count
+
+amenities_combined <- london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  summarize(combined = st_combine(geometry), number = n()) %>% 
+  st_centroid()
+
+amenities_combined_filtered <- amenities_combined %>%
+  filter(number >=5) # 1783 neighbourhoods
+
+# Filter the nb_clus values from amenities_combined_filtered
+selected_nb_clus <- amenities_combined_filtered$nb_clus
+
+# Filter the original data based on selected_nb_clus
+filtered_london_entropy_iso <- london_entropy_iso %>%
+  filter(nb_clus %in% selected_nb_clus)
+  
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_400.geojson'
+# 
+# st_write(filtered_london_entropy_iso, file_path, driver = 'geojson')
+
+# neighbourhoods from concave hulls enveloping the amenities of a single neighbourhood
+
+neighbourhoods_iso_hull <- filtered_london_entropy_iso %>% 
+  group_by(nb_clus) %>% 
+  group_modify(.,concaveman,concavity = 1) %>% 
+  rename(geometry = polygons) %>% 
+  st_sf() %>% 
+  st_make_valid()
+
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/whole_neighbourhoods_polygon_400.geojson'
+# 
+# st_write(neighbourhoods_iso_hull, file_path, driver = 'geojson')
+```
+
+```{r map making}
+# read in road data
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+
+# neighbourhood concave hulls
+london_neighbourhoods_artsy <- tm_shape(edges) + tm_lines(col="black"
+                                  ,alpha = 0.3
+                           ) +
+  tm_shape(neighbourhoods_iso_hull) + tm_fill(col= "MAP_COLORS"
+                                              ,palette = "Set1"
+                                              ,alpha = .8
+                                              ,style = "cat"
+                                              ) +
+  tm_layout(legend.show = FALSE
+            ,title = "1783 Mixed Urban Amenity Neighbourhoods in London") +
+  tm_scale_bar()
+#london_neighbourhoods_artsy
+
+tmap_save(london_neighbourhoods_artsy
+          ,"whole_neighbourhoods_iso_pretty_400_10000-it.pdf"
+          ,height = 20
+          ,width = 16)
+```
+
+
+
+```{r filtered neighbourhoods which contain all 15 minute urban services}
+# Calculate the count of unique '15minute_service' categories for each 'cluster_number'
+cluster_counts <- london_entropy_iso %>%
+  group_by(nb_clus) %>%
+  summarize(unique_services = n_distinct(X15minute_6_urban_service)) 
+
+# Filter the cluster_numbers that have all 5 unique '15minute_service' categories
+filtered_cluster_numbers <- cluster_counts %>%
+  filter(unique_services == 5) %>%
+  pull(nb_clus)
+
+# Filter the original dataframe based on the filtered_cluster_numbers
+filtered_df <- london_entropy_iso %>%
+  filter(nb_clus %in% filtered_cluster_numbers) %>%
+  group_by(nb_clus) %>%
+  summarise(num_amenities = n()) %>%
+  arrange(num_amenities)
+
+
+
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/filtered_neighbourhoods_400.geojson'
+# 
+# st_write(filtered_london_entropy_iso, file_path, driver = 'geojson')
+
+neighbourhoods_iso_hull <- filtered_df %>% 
+  group_by(nb_clus) %>% 
+  group_modify(.,concaveman,concavity = 1) %>% 
+  rename(geometry = polygons) %>% 
+  st_sf() %>% 
+  st_make_valid()
+
+# file_path <- 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/filtered_neighbourhoods_polygon_400.geojson'
+# 
+# st_write(neighbourhoods_iso_hull, file_path, driver = 'geojson')
+```
+
+```{r 15minute service filtered neighbourhood map making}
+# read in road data
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+
+# neighbourhood concave hulls
+london_neighbourhoods_artsy <- tm_shape(edges) + tm_lines(col="black"
+                                  ,alpha = 0.3
+                           ) +
+  tm_shape(neighbourhoods_iso_hull) + tm_fill(col= "MAP_COLORS"
+                                              ,palette = "Set1"
+                                              ,alpha = .8
+                                              ,style = "cat"
+                                              ) +
+  tm_layout(legend.show = FALSE
+            ,title = "668 Mixed Urban Amenity Neighbourhoods in London") +
+  tm_scale_bar()
+#london_neighbourhoods_artsy
+
+tmap_save(london_neighbourhoods_artsy
+          ,"filtered_neighbourhoods_iso_pretty_400_10000-it.pdf"
+          ,height = 20
+          ,width = 16)
+```
+

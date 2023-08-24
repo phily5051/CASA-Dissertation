@@ -1,0 +1,1049 @@
+---
+title: "uncertainty_test"
+output: html_document
+date: "2023-07-26"
+---
+
+# 1. Packages
+```{r packages}
+# load packages
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(gtools)
+library(tmap)
+library(tmaptools)
+library(sf)
+library(here)
+```
+
+# 2. Read in Data
+```{r data}
+# liveability indicator data
+lon_all <- read_csv(here::here('data', 'final_data', 'final_500.csv'))
+
+# 
+diversity <- lon_all[1:6]
+proximity <- lon_all[c(1, 7:11)]
+pop_density <- lon_all[c(1, 12)]
+```
+
+```{r}
+gc()
+```
+
+
+# 3. Prerequisites
+## 3.1. Customised functions
+```{r}
+# exponential transformation
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# function to rank and exponentially transform a variable in a given table
+rank_exp <- function(df, var){
+  
+  var <- enquo(var)
+  # select relevant data from df
+  data <- select(df, nb_clus, !! var)
+  # create a ranking, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!! var),
+           rank_s = scales::rescale(rank, to = c(0, 1)),
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+
+# proximity 
+rank_exp_proximity <- function(df, var){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  # Create a ranking, reverse the rank for proximity scores, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!!var),
+           reversed_rank = max(rank) - rank + 1,  # Reversing the rank for proximity scores
+           rank_s = scales::rescale(reversed_rank, to = c(0, 1)),  # Rescale the reversed rank to 0-1
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+
+# minmax scalar
+minmax <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var) 
+  
+  data %>% 
+    mutate(mm = ((!!var- min(!!var)) /(max(!!var)-min(!!var)))) %>%
+    select(mm)
+}
+
+
+minmax_proximity <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var) 
+  
+  data %>% 
+    mutate(mm = (1- ((!!var- min(!!var)) /(max(!!var)-min(!!var))))) %>%
+    select(mm)
+}
+
+
+# Z-score standardisation
+ss <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(ss = ((!!var - mean(!!var, na.rm = na.rm)) / sd(!!var, na.rm = na.rm))) %>%
+    select(ss)
+}
+
+ss_proximity <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(ss = -((!!var - mean(!!var, na.rm = na.rm)) / sd(!!var, na.rm = na.rm))) %>%
+    select(ss)
+}
+
+
+# Robust normalisation
+robust <- function(df, var, na.rm = T){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(rs = (!!var - median(!!var, na.rm= TRUE)) / IQR(!!var, na.rm = TRUE)) %>%
+    select(rs)
+}
+
+robust_proximity <- function(df, var, na.rm = T){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(rs = -((!!var - median(!!var, na.rm= TRUE)) / IQR(!!var, na.rm = TRUE))) %>%
+    select(rs)
+}
+
+```
+
+## 3.2. Lists to use in a loop
+```{r}
+# Exclusion of subindicators
+## weights given, when one of subindicators is excluded
+diversity_weights <- list('1' = c(0.2, 0.2, 0.2, 0.2, 0.2),
+                          '2' = c(0, 0.25, 0.25, 0.25, 0.25),
+                          '3' = c(0.25, 0, 0.25, 0.25, 0.25),
+                          '4' = c(0.25, 0.25, 0, 0.25, 0.25),
+                          '5' = c(0.25, 0.25, 0.25, 0, 0.25),
+                          '6' = c(0.25, 0.25, 0.25, 0.25, 0))
+
+proximity_weights <- list('1' = c(0.2, 0.2, 0.2, 0.2, 0.2),
+                          '2' = c(0, 0.25, 0.25, 0.25, 0.25),
+                          '3' = c(0.25, 0, 0.25, 0.25, 0.25),
+                          '4' = c(0.25, 0.25, 0, 0.25, 0.25),
+                          '5' = c(0.25, 0.25, 0.25, 0, 0.25),
+                          '6' = c(0.25, 0.25, 0.25, 0.25, 0))
+
+# When combining 3 domains, in case when population density is excluded
+pop_density_weights <- list('1' = c(1/3, 1/3, 1/3),
+                            '2' = c(0.5, 0.5, 0))
+
+# normalisation methods
+# normal_tests <- list('1' = c('rank_exp'),
+#                      '2' = c('minmax'),
+#                      '3' = c('robust'))
+```
+
+
+# 4. Processing
+## 4.1. Rank Exponential Normalisation
+```{r 72 scenarios - rank_exp}
+ua_output_exp <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- lon_all[1:6]
+  
+  # exponential transformation on each diversity subindicator
+  diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+  diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+  diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+  diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+  diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_exp * diversity_weights[[div_w]][1]) + 
+             (d_edu_exp * diversity_weights[[div_w]][2]) + 
+             (d_enter_exp * diversity_weights[[div_w]][3]) + 
+             (d_l_exp * diversity_weights[[div_w]][4]) + 
+             (d_h_exp * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_exp'] <- rank_exp(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_exp)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- lon_all[c(1, 7:11)]
+    
+    # exponential transformation on each proximity indicator
+    proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+    proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+    proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+    proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+    proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_exp * proximity_weights[[prox_w]][1]) + 
+               (p_edu_exp * proximity_weights[[prox_w]][2]) + 
+               (p_enter_exp * proximity_weights[[prox_w]][3]) + 
+               (p_l_exp * proximity_weights[[prox_w]][4]) + 
+               (p_h_exp * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_exp'] <- rank_exp(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_exp)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- lon_all[c(1, 12)]
+      
+      # exponential transformation on population density
+      pop_density['pop_den_exp'] <- rank_exp(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_exp * pop_density_weights[[pop_w]][1]) + 
+                 (prox_exp * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_exp * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_exp'] <- rank_exp(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_exp, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'rank_exp'
+      
+      ua_output_exp <- rbind(ua_output_exp, li_final)
+      
+      
+    }
+    
+  }
+}
+
+write_csv(ua_output_exp, 'ua_rank_exp.csv')
+```
+
+
+## 4.2. MinMax Normalisation
+```{r 72 scenarios - minmax}
+ua_output_mm <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- lon_all[1:6]
+  
+  # minmax normalisation on each diversity subindicator
+  diversity[,'d_c_mm'] <- minmax(diversity, d_c)
+  diversity[,'d_edu_mm'] <- minmax(diversity, d_edu)
+  diversity[,'d_enter_mm'] <- minmax(diversity, d_enter)
+  diversity[,'d_l_mm'] <- minmax(diversity, d_l)
+  diversity[,'d_h_mm'] <- minmax(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_mm * diversity_weights[[div_w]][1]) + 
+             (d_edu_mm * diversity_weights[[div_w]][2]) + 
+             (d_enter_mm * diversity_weights[[div_w]][3]) + 
+             (d_l_mm * diversity_weights[[div_w]][4]) + 
+             (d_h_mm * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_mm'] <- minmax(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_mm)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- lon_all[c(1, 7:11)]
+    
+    # minmax normalisation on each proximity indicator
+    proximity[,'p_c_mm'] <- minmax_proximity(proximity, p_c)
+    proximity[,'p_edu_mm'] <- minmax_proximity(proximity, p_edu)
+    proximity[,'p_enter_mm'] <- minmax_proximity(proximity, p_enter)
+    proximity[,'p_l_mm'] <- minmax_proximity(proximity, p_l)
+    proximity[,'p_h_mm'] <- minmax_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_mm * proximity_weights[[prox_w]][1]) + 
+               (p_edu_mm * proximity_weights[[prox_w]][2]) + 
+               (p_enter_mm * proximity_weights[[prox_w]][3]) + 
+               (p_l_mm * proximity_weights[[prox_w]][4]) + 
+               (p_h_mm * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_mm'] <- minmax(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_mm)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- lon_all[c(1, 12)]
+      
+      # minmax normalisation on population density
+      pop_density['pop_den_mm'] <- minmax(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_mm * pop_density_weights[[pop_w]][1]) + 
+                 (prox_mm * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_mm * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_mm'] <- minmax(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_mm, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'minmax'
+      
+      ua_output_mm <- rbind(ua_output_mm, li_final)
+      
+      
+    }
+    
+  }
+}
+
+write_csv(ua_output_mm, 'ua_minmax.csv')
+```
+
+
+## 4.3. Standardisation
+```{r 72 scenarios - standardisation}
+ua_output_ss <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- lon_all[1:6]
+  
+  # standardisation on each diversity subindicator
+  diversity[,'d_c_ss'] <- ss(diversity, d_c)
+  diversity[,'d_edu_ss'] <- ss(diversity, d_edu)
+  diversity[,'d_enter_ss'] <- ss(diversity, d_enter)
+  diversity[,'d_l_ss'] <- ss(diversity, d_l)
+  diversity[,'d_h_ss'] <- ss(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_ss * diversity_weights[[div_w]][1]) + 
+             (d_edu_ss * diversity_weights[[div_w]][2]) + 
+             (d_enter_ss * diversity_weights[[div_w]][3]) + 
+             (d_l_ss * diversity_weights[[div_w]][4]) + 
+             (d_h_ss * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_ss'] <- ss(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_ss)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- lon_all[c(1, 7:11)]
+    
+    # standardisation on each proximity indicator
+    proximity[,'p_c_ss'] <- ss_proximity(proximity, p_c)
+    proximity[,'p_edu_ss'] <- ss_proximity(proximity, p_edu)
+    proximity[,'p_enter_ss'] <- ss_proximity(proximity, p_enter)
+    proximity[,'p_l_ss'] <- ss_proximity(proximity, p_l)
+    proximity[,'p_h_ss'] <- ss_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_ss * proximity_weights[[prox_w]][1]) + 
+               (p_edu_ss * proximity_weights[[prox_w]][2]) + 
+               (p_enter_ss * proximity_weights[[prox_w]][3]) + 
+               (p_l_ss * proximity_weights[[prox_w]][4]) + 
+               (p_h_ss * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_ss'] <- ss(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_ss)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- lon_all[c(1, 12)]
+      
+      # standardisation on population density
+      pop_density['pop_den_ss'] <- ss(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_ss * pop_density_weights[[pop_w]][1]) + 
+                 (prox_ss * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_ss * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_ss'] <- ss(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_ss, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'ss'
+      
+      ua_output_ss <- rbind(ua_output_ss, li_final)
+      
+      
+    }
+    
+  }
+}
+
+write_csv(ua_output_ss, 'ua_standardisation.csv')
+```
+
+
+## 4.4. Robust normalisation
+```{r}
+ua_output_rs <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- lon_all[1:6]
+  
+  # robust normalisation on each diversity subindicator
+  diversity[,'d_c_rs'] <- robust(diversity, d_c)
+  diversity[,'d_edu_rs'] <- robust(diversity, d_edu)
+  diversity[,'d_enter_rs'] <- robust(diversity, d_enter)
+  diversity[,'d_l_rs'] <- robust(diversity, d_l)
+  diversity[,'d_h_rs'] <- robust(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_rs * diversity_weights[[div_w]][1]) + 
+             (d_edu_rs * diversity_weights[[div_w]][2]) + 
+             (d_enter_rs * diversity_weights[[div_w]][3]) + 
+             (d_l_rs * diversity_weights[[div_w]][4]) + 
+             (d_h_rs * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_rs'] <- robust(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_rs)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- lon_all[c(1, 7:11)]
+    
+    # robust normalisation on each proximity indicator
+    proximity[,'p_c_rs'] <- robust_proximity(proximity, p_c)
+    proximity[,'p_edu_rs'] <- robust_proximity(proximity, p_edu)
+    proximity[,'p_enter_rs'] <- robust_proximity(proximity, p_enter)
+    proximity[,'p_l_rs'] <- robust_proximity(proximity, p_l)
+    proximity[,'p_h_rs'] <- robust_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_rs * proximity_weights[[prox_w]][1]) + 
+               (p_edu_rs * proximity_weights[[prox_w]][2]) + 
+               (p_enter_rs * proximity_weights[[prox_w]][3]) + 
+               (p_l_rs * proximity_weights[[prox_w]][4]) + 
+               (p_h_rs * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_rs'] <- robust(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_rs)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- lon_all[c(1, 12)]
+      
+      # standardisation on population density
+      pop_density['pop_den_rs'] <- robust(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_rs * pop_density_weights[[pop_w]][1]) + 
+                 (prox_rs * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_rs * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_rs'] <- robust(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_rs, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'rs'
+      
+      ua_output_rs <- rbind(ua_output_rs, li_final)
+      
+      
+    }
+    
+  }
+}
+
+write_csv(ua_output_rs, 'ua_robust.csv')
+```
+
+## 4.5 Bind all scenarios
+```{r}
+# Assuming column names are consistent, adjust the data frames as needed
+ua_output_exp <- rename(ua_output_exp, li_norm_score = li_exp)
+ua_output_mm <- rename(ua_output_mm, li_norm_score = li_mm)
+ua_output_rs <- rename(ua_output_rs, li_norm_score = li_rs)
+ua_output_ss <- rename(ua_output_ss, li_norm_score = li_ss)
+
+# Then combine them using rbind
+ua_output <- rbind(ua_output_exp, ua_output_mm, ua_output_rs, ua_output_ss)
+
+write.csv(ua_output, 'ua_output_final.csv')
+```
+
+# 5. Summary statistics for UA outputs
+## 5.1. Reference ranking
+```{r reference ranking}
+# read in ua_output_final
+ua_output <- read_csv(here::here('output', 'ua_test', '500m', 'ua_output_final_500.csv'))
+
+# draw out baseline
+baseline <- ua_output %>%
+  filter(diversity_weight == 1, 
+         proximity_weight == 1,
+         pop_density_weight == 1,
+         normalisation == 'rank_exp') %>%
+  select(nb_clus, li_rank_b = li_rank)
+
+# save reference ranking to csv for use in sensitivity analysis
+# write_csv(baseline, 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/output/li_reference_rank_500.csv')
+```
+
+## 5.2. Summary stats
+```{r}
+# left join reference to full table, so we can work out each iterations score compared to the reference
+ua_final <- ua_output %>%
+  left_join(baseline, by = 'nb_clus') %>%
+  mutate(li_rank_change = abs(li_rank - li_rank_b))
+         #rank_change_perc = li_rank_change / 1209)
+
+# save data
+#write_csv(ua_final, 'ua_all_tests_rank_change_500.csv')
+
+# summary stats for each variation of the model run
+ua_vars <- ua_final %>% 
+  group_by(diversity_weight, 
+           proximity_weight, 
+           pop_density_weight, 
+           normalisation) %>%
+  summarise(mean_rank_change = mean(rank_change_perc),
+            min_rank_change = min(rank_change_perc),
+            max_rank_change = max(rank_change_perc),
+            sd_rank_change = sd(rank_change_perc),
+            count = n())
+
+# check we are grouping all used indicators. Result should be 0.
+filter(ua_vars, count != 1209)
+
+#write_csv(ua_vars, 'sensitivity_analysis_variants_500.csv')
+```
+
+
+
+
+
+
+# 6. Distribution of SD in mean neighbourhood ranking across different factor values
+## 6.1. Assign neighbourhoods to London Boroughs
+The code below assigns each neighbourhood to boroughs it intersects with the most using spatial intersection. The neighbourhoods are constructed from the agglomeration of amenities, so they do not necessarily align with administrative boundary. Thus, some neighbourhoods overlap with multiple boroughs.
+
+This procedure has been taken for the ease of interpretation and visualisation. This way, you can approximate the neighbourhoods' aggregation to boroughs.
+```{r}
+# read in london neighbourhood sf
+neighbourhood_sf <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+
+# London Boroughs
+borough_sf <- st_read(here::here('data', 'boundary', 'London_Borough_Excluding_MHW.shp')) %>% st_transform(27700)
+
+# Step 1: Perform spatial intersection
+intersection <- st_intersection(neighbourhood_sf, borough_sf) # 1551 observations
+
+# Step 2: Determine the borough with the largest intersection area for each neighborhood
+neighbourhood_sf$LAD <- sapply(1:nrow(neighbourhood_sf), function(i) {
+  
+  intersected_boroughs <- intersection$NAME[intersection$nb_clus == neighbourhood_sf$nb_clus[i]]
+  
+  if (length(intersected_boroughs) > 0) {
+    # Get the borough with the largest intersection area
+    borough_with_max_area <- intersected_boroughs[which.max(intersection$geometry[intersection$nb_clus == neighbourhood_sf$nb_clus[i]] %>% st_area())]
+    
+    return(borough_with_max_area)
+  } else {
+    # Handle neighborhoods that do not intersect with any borough
+    return(NA)
+  }
+})
+
+# check whether there is any neighbourhood that is not assigned of boroughs
+sum(is.na(neighbourhood_sf$assigned_borough)) # all neighbourhoods have been assigned to boroughs
+```
+
+## 6.2. Data Join
+```{r}
+neighbourhood_lon <- neighbourhood_sf %>% st_set_geometry(NULL)
+
+# join to get LAD field and create unique test identifier to group by
+results <- ua_final %>% 
+  left_join(neighbourhood_lon, by = 'nb_clus') %>% 
+  unite(test, c('normalisation', 'diversity_weight', 
+                'proximity_weight', 'pop_density_weight'), 
+        remove = FALSE)
+
+# How many scenarios? 288 (6 * 6 * 2 * 4)
+nrow(distinct(results, test))
+
+# xx <- results %>%
+#   group_by(test, LAD) %>%
+#   summarise(mean_rank_change = mean(li_rank_change),
+#             sum_rank_change = sum(mean_rank_change),
+#             mean_Rs = sum_rank_change / 33)
+# 
+# 
+# xx <- results %>%
+#   group_by(test, LAD) %>%
+#   summarise(mean_rank_change = mean(li_rank_change),
+#             mean_Rs = mean_rank_change / 33)
+# 
+# 
+# test <- results %>%
+#   group_by(test, LAD) %>% 
+#   summarise(change_sum = sum(li_rank_change),
+#             Rs = change_sum/1209)
+# 
+# test1 <- test %>%
+#   left_join(neighbourhood_lon, by ='nb_clus')
+# 
+# test2 <- test1 %>%
+#   group_by(test, LAD) %>%
+#   summarise(R = mean(Rs))
+
+#write.csv(test, 'average_shift.csv', row.names = FALSE)
+```
+
+
+
+
+
+
+```{r}
+# for each test factor calculate mean rank for each neighbourhood then deviation in mean rank across each test
+
+dev_normalisation <- results %>% 
+  group_by(nb_clus, normalisation) %>% 
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 1209, test = 'normalisation')
+
+dev_diversity <- results %>% 
+  group_by(nb_clus, diversity_weight) %>% 
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 1209, test = 'diversity_weight')
+
+dev_proximity <- results %>% 
+  group_by(nb_clus, proximity_weight) %>% 
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 1209, test = 'proximity_weight')
+
+dev_pop_density <- results %>%
+  group_by(nb_clus, pop_density_weight) %>%
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 1209, test = 'pop_density_weight')
+
+
+# bind all tables together - 4836 rows
+dev_all <- plyr::rbind.fill(dev_normalisation, dev_diversity, dev_proximity, dev_pop_density)
+
+# check
+head(dev_all)
+
+# check we have 1209 records for each test
+dev_all %>% group_by(test) %>% summarise(count = n())
+
+# save data
+write_csv(dev_all, 'rank_dev_all_500.csv')
+```
+
+# 7. Plots 
+## 7.1. Neighbourhood deviation in mean rank across factor values Plot
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Custom names for x-axis labels
+custom_names <- c("X4 - Normalisation Factor", "X3 - Population Density Factor", "X2 - Proximity Factor", "X1 - Diversity Factor")
+
+# Create a custom label function
+custom_label_function <- function(variable, value) {
+  return(custom_names[value])
+}
+
+# Calculate median rank for each test factor
+median_rank <- dev_all %>%
+  group_by(test) %>%
+  summarise(median_rank = median(rank_dev))
+
+# Reorder levels of the test factor based on median rank
+dev_all$test <- factor(dev_all$test, levels = median_rank$test[order(median_rank$median_rank, decreasing = TRUE)])
+
+# Plot with customized x-axis labels
+myplot2 <- ggplot(dev_all, aes(x = test, y = rank_dev, fill = test)) +
+  geom_boxplot(fill = 'lightskyblue2', alpha = 0.3) +
+  xlab("") +
+  ylab("Standard Deviation of Mean Rank") +
+  ggtitle("Comparison of Uncertainty for Different Test Factors") +
+  facet_wrap(~ test, scales = "free_x", nrow = 1, labeller = labeller(test = custom_label_function)) +
+  theme(axis.text.x = element_blank(),        # Remove x-axis labels
+        axis.ticks.x = element_blank(),       # Remove x-axis ticks
+        strip.text.x = element_text(face = "bold"),  # Keep facet labels bold
+        axis.text.y = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", size =20, hjust = 0.5),  # Center the main title
+        strip.background = element_blank(),    # Remove the background of facet labels
+        legend.position = 'none')             # Remove the legend
+
+myplot2
+ggsave('sd_mean_nb_for_factors_500.png', plot = myplot2, width = 10, height = 8, dpi = 300)
+```
+
+
+
+## 7.2. LAD Rankings for all simulations
+```{r}
+# Step 1: By grouping neighbourhoods by boroughs and test, we can calculate the aggregated average li_score for each borough
+mean_scores_by_test <- results %>%
+  group_by(LAD, test) %>%
+  summarise(mean_li_score = mean(li_score))
+
+# Step 2: Calculate the rank of each borough under each of the 288 different test conditions. Boroughs with the highest li_score will have the rank of 33, while the one with the lowest will be assigned of a rank of 1.
+lad_rank_for_288_tests <- mean_scores_by_test %>%
+  group_by(test) %>%
+  mutate(LAD_rank = min_rank(mean_li_score))
+```
+```{r}
+# step 3: baseline
+baseline <- lad_rank_for_288_tests %>%
+  filter(test == 'rank_exp_1_1_1') 
+baseline$LAD_rank_b <- baseline$LAD_rank
+
+baseline <- baseline %>% select(LAD, LAD_rank_b)
+
+# merge
+merged_data <- lad_rank_for_288_tests %>%
+  left_join(.,
+            baseline,
+            by = 'LAD') %>%
+  mutate(li_rank_change = abs(LAD_rank - LAD_rank_b)) %>% 
+  select(-c(test.y, LAD_rank_b))
+
+
+
+#average shift in rank
+avg_sft_LAD <- merged_data %>%
+  group_by(test.x) %>%
+  summarise(sum_rank_change = sum(li_rank_change),
+            Rs = sum_rank_change/33)
+
+write.csv(avg_sft_LAD, 'avg_sft_lad.csv', row.names = F)
+
+```
+
+```{r}
+# Create a density plot with y-axis representing occurrence
+density_plot <- ggplot(avg_sft_LAD, aes(x = Rs)) +
+  geom_histogram(binwidth = 0.08, fill = "dodgerblue1", color = "black", position = "identity") +
+  #geom_vline(xintercept = mean_rank_change, color = "red", linetype = "dashed") +  # Add vertical line
+  labs(x = "Rank Change Percentage", y = "Occurrence") +  # Adjust y-axis label
+  ggtitle("Density Plot of Rank Change Percentage") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5, family = 'sans'))
+
+# Print the density plot
+print(density_plot)
+```
+
+
+```{r overall LI Rank}
+# Calculate the median rank for each borough
+median_rank_by_borough <- lad_rank_for_288_tests %>%
+  group_by(LAD) %>%
+  summarize(median_rank = median(LAD_rank))
+
+# Reorder the LAD factor levels based on the median rank
+lad_rank_for_288_tests$LAD <- factor(
+  lad_rank_for_288_tests$LAD,
+  levels = median_rank_by_borough$LAD[order(median_rank_by_borough$median_rank)]
+)
+
+# Create the box plot for each borough with individual points
+myplot1<- ggplot(lad_rank_for_288_tests, aes(x = LAD, y = LAD_rank)) +
+  geom_boxplot(fill = "black", alpha = 0.1, width = 0.5) +
+  geom_jitter(width = 0.2, size = 0.4, alpha = 0.3, color = "dodgerblue1") +
+  labs(x = "Local Authority District (LAD)", y = "Rank") +
+  ggtitle("Liveability Rank of Boroughs under Different Simulations") +
+  theme_bw() +  # Set the theme to a white background with black axes and grid lines
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5 , family = 'sans', margin = margin(b = 20))) 
+# Rotate x-axis labels for better readability
+
+myplot1
+
+ggsave('ua_rank_simulation_500.png', plot = myplot1, width = 12, height = 12, dpi = 300)
+```
+
+## 7.3. LAD Rankings by normalisation factor
+```{r plot ranking by normalisation factor}
+mean_scores_by_test <- results %>%
+  group_by(LAD, test, normalisation) %>%
+  summarise(mean_li_score = mean(li_score))
+
+# Step 2: Calculate the rank of each borough under each of the 288 different test conditions. Boroughs with the highest li_score will have the rank of 33, while the one with the lowest will be assigned of a rank of 1.
+lad_rank_for_288_tests_norm <- mean_scores_by_test %>%
+  group_by(test) %>%
+  mutate(LAD_rank = min_rank(mean_li_score))
+
+
+# Calculate the median rank for each borough
+median_rank_by_borough <- lad_rank_for_288_tests_norm %>%
+  group_by(LAD) %>%
+  summarize(median_rank = median(LAD_rank))
+
+# Reorder the LAD factor levels based on the median rank
+lad_rank_for_288_tests_norm$LAD <- factor(
+  lad_rank_for_288_tests_norm$LAD,
+  levels = median_rank_by_borough$LAD[order(median_rank_by_borough$median_rank)]
+)
+
+my_colors <- c("minmax" = "firebrick2", "rank_exp" = "purple4", "ss" = "darkgoldenrod1", "rs" = "mediumseagreen")
+
+myplot2 <- ggplot(lad_rank_for_288_tests_norm, aes(x = LAD, y = LAD_rank)) +
+  geom_boxplot(fill = "black", alpha = 0.1, width = 0.5) +
+  geom_jitter(aes(color = normalisation), width = 0.2, size = 0.4, alpha = 0.3) +
+  labs(x = "Local Authority District (LAD)", y = "Rank", color = "Factor X4 Value") +
+  ggtitle("Liveability Rank of Boroughs under Different Simulations") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5, family = 'sans', margin = margin(b = 20)),
+        legend.text = element_text(size = 12.5),
+        legend.title = element_text(size = 14)) +
+  scale_color_manual(values = my_colors, labels = c('minmax' = 'MinMax normalisation',
+                                                    'rank_exp' = 'Exponential transformation',
+                                                    'ss' = 'Standardisation',
+                                                    'rs' = 'Robust normalisation'))
+
+myplot2
+
+
+
+
+ggsave('ua_rank_simulation_norm_500.png', plot = myplot2, width = 12, height = 12, dpi = 300)
+```
+
+## 7.4. LAD Rankings by diversity
+```{r plot ranking by diversity}
+mean_scores_by_test <- results %>%
+  group_by(LAD, test, diversity_weight) %>%
+  summarise(mean_li_score = mean(li_score))
+
+# Step 2: Calculate the rank of each borough under each of the 288 different test conditions. Boroughs with the highest li_score will have the rank of 33, while the one with the lowest will be assigned of a rank of 1.
+lad_rank_for_288_tests_norm <- mean_scores_by_test %>%
+  group_by(test) %>%
+  mutate(LAD_rank = min_rank(mean_li_score))
+
+
+# Calculate the median rank for each borough
+median_rank_by_borough <- lad_rank_for_288_tests_norm %>%
+  group_by(LAD) %>%
+  summarize(median_rank = median(LAD_rank))
+
+# Reorder the LAD factor levels based on the median rank
+lad_rank_for_288_tests_norm$LAD <- factor(
+  lad_rank_for_288_tests_norm$LAD,
+  levels = median_rank_by_borough$LAD[order(median_rank_by_borough$median_rank)]
+)
+
+
+# Define custom colors for each diversity_weight value
+my_colors <- c("1" = "firebrick2", "2" = "purple4", "3" = "darkgoldenrod1",
+               "4" = "mediumseagreen", "5" = 'deepskyblue1', '6' = 'grey40')
+
+# Create the plot
+myplot3 <- ggplot(lad_rank_for_288_tests_norm, aes(x = LAD, y = LAD_rank)) +
+  geom_boxplot(fill = "black", alpha = 0.1, width = 0.5) +
+  geom_jitter(aes(color = as.factor(diversity_weight)), width = 0.2, size = 0.4, alpha = 0.3) +
+  labs(x = "Local Authority District (LAD)", y = "Rank", color = "Factor X1 Value") +
+  ggtitle("Liveability Rank of Boroughs under Different Simulations") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5, family = 'sans', margin = margin(b = 20)),
+        legend.text = element_text(size = 12.5),
+        legend.title = element_text(size = 14)
+        ) +
+  scale_color_manual(values = my_colors)
+
+myplot3
+
+
+
+
+ggsave('ua_rank_simulation_div_500.png', plot = myplot3, width = 12, height = 12, dpi = 300)
+```
+

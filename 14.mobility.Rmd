@@ -1,0 +1,404 @@
+---
+title: "mobility_analysis"
+author: "phil"
+date: "2023-06-25"
+output: html_document
+---
+
+```{r packages}
+library(sf)
+library(here)
+library(dplyr)
+library(rgdal)
+library(sp)
+library(tidyverse)
+gc()
+```
+
+# 1. Import Data from OneDrive and Filter Data
+```{r February Data}
+# Define the path to the folder containing the data files
+data_folder <- "C:/Users/phily/OneDrive/locomizer/traces/"
+
+# Define the output folder for the filtered data
+output_folder <- "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/locomizer/"
+
+# Loop through each day in February
+for (day in 1:28) {
+  # Create the file path
+  file_path <- paste0(data_folder, "Audience_Profiles_Footfall_Hex_2023-02-", sprintf("%02d", day), "_UK.tsv")
+  
+  # Read the data
+  sample <- read.delim(file_path)
+  
+  # Rename columns
+  names(sample) <- c('hex_code', 'lat', 'lon', 'city', 'time', 'day_type', 'day', 'month', 'year', 'movement_modality', 'visitation_modality', 'num_users', 'num_signals', 'reach', 'dwell_time', 'footfall_score', 'norm_footfall_score', 'footfall_score_rank', 'extrapolated_num_users', 'extrapolated_num_signals')
+  
+  # Filter the data
+  test <- sample %>%
+    select(c(1, 5, 10, 11, 16, 17, 18)) %>%
+    filter(time == 25, movement_modality == 'PEDESTRIANS')
+  
+  # Create the output file path
+  output_file <- paste0(output_folder, "footfall23-02-", sprintf("%02d", day), ".csv")
+  
+  # Save the filtered data
+  write.csv(test, output_file, row.names = FALSE)
+  
+  # Print progress
+  cat("Processed day:", day, "\n")
+}
+
+cat("Data processing complete.")
+
+```
+
+```{r memory usage}
+gc()
+```
+
+# 2. Calculate the Average Normalised Footfall Score per Hexagon ID
+```{r}
+library(dplyr)
+
+# Set the directory containing the data files
+data_folder <- "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/locomizer/footfall/"
+
+# Create an empty list to store data frames
+data_list <- list()
+
+# Loop through each day and read the data
+for (day in 1:28) {
+  file_path <- paste0(data_folder, "footfall02", sprintf("%02d", day), ".csv")
+  data_list[[day]] <- read.csv(file_path)
+}
+
+# Merge data frames based on hexagon ID, filling missing values with zeros
+merged_data <- Reduce(function(x, y) merge(x, y, by = "hex_code", all = TRUE), data_list)
+merged_data[is.na(merged_data)] <- 0
+
+
+# Calculate the average footfall score for each hexagon
+merged_data$average_footfall <- rowMeans(merged_data[, grep("^norm_footfall_score", names(merged_data))], na.rm = TRUE)
+
+
+# Select only the relevant columns
+result <- merged_data[, c("hex_code", "average_footfall")]
+
+# Save the result as a CSV file
+write.csv(result, "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/locomizer/footfall/average_footfall_per_hexagon.csv", row.names = FALSE)
+```
+
+
+
+
+# 3.  Normalised Footfall Score Projection to a Neighbourhood-level
+### Merge data
+```{r memory usage}
+gc()
+```
+
+```{r}
+# read in the average normalised footfall score data - 114208 hexagons
+result <- read_csv(here::here('data', 'locomizer', 'footfall', 'average_footfall_per_hexagon.csv'))
+
+# read in uber 3 10 level data - 120232 hexagons
+london_hex <-st_read("C:/Users/phily/OneDrive/locomizer/Greater_London.json") %>% 
+  st_transform(27700)
+```
+
+
+```{r merge result with hexagon grid sf data}
+# we need geometry column so we need to merge the result avg footfall data with hexagon grid sf data
+hex_footfall <- left_join(london_hex,
+                          result,
+                          by = c('X_index' = 'hex_code')) %>% select(-c(2,3))
+
+
+# replace na values with 0 as these na values indicate that people did not visit these hexagons.
+hex_footfall['average_footfall'][is.na(hex_footfall['average_footfall'])] <- 0
+sum(is.na(hex_footfall))
+
+# max/min
+max(hex_footfall$average_footfall) # 57.64
+min(hex_footfall$average_footfall) # 0 originated from hexagons that people did not visit
+
+# high footfall score - 15372 rows out of 120232 rows are higher than 1 
+foot_high <- hex_footfall[hex_footfall$average_footfall >= 1, c('X_index', 'average_footfall')]
+```
+
+```{r plot}
+ggplot(hex_footfall, aes(average_footfall)) +
+  geom_histogram(binwidth = 0.5) +
+  xlab('Average Normalised Footfall Score') +
+  ylab('Frequency') +
+  ggtitle('The Distribution of Average Normalised Footfall Score')
+
+# The plot will be drawn in Python to be consistent in plot style
+# save for plot
+hex_foot <- hex_footfall %>% select(-hex_area) %>% st_set_geometry(NULL) 
+#write.csv(hex_foot, 'hex_foot_plot.csv', row.names = F)
+```
+
+
+
+### Data projection to a neighbourhood
+```{r read in neighbourhood polygons}
+# read in neighbourhood polygon at isochrone of 500m
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+```
+
+
+```{r GBS scores at neighbourhood level}
+# calculate the area size of each neighbourhood
+hex_footfall$hex_area <- st_area(hex_footfall)
+
+# Perform spatial intersection
+intersection <- st_intersection(hex_footfall, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+max(intersection$area_proportion)
+min(intersection$area_proportion)
+
+# Calculate the estimated population within each neighborhood polygon
+intersection$estimated_footfall_score <- intersection$average_footfall * intersection$area_proportion
+
+# When sum of weights does not sum up to 1, weighted average is calculated by 
+# Sum of each number multiplied by its weight / sum of all weights = weighted average
+# Group by hexagon index
+neighbourhood_fs <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(weighted_avg_footfall = sum(estimated_footfall_score) / sum(area_proportion))
+
+min(neighbourhood_fs$weighted_avg_footfall)
+max(neighbourhood_fs$weighted_avg_footfall)
+
+# # save data - just those with populations
+# file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/output/neighbourhood_500_footfall.geojson'
+# # #
+# st_write(neighbourhood_fs, file_path, driver = 'GeoJSON')
+gc()
+```
+
+
+# 4.  Difference in Active Travel Frequency between Neighbourhoods
+```{r}
+# liveability index
+lci <- read_csv(here::here('output', 'liveability_index_500.csv'))
+
+# footfall score
+nb_fs <- st_read(here::here('output', 'neighbourhood_500_footfall.geojson')) %>% st_transform(27700)
+
+# merge lci and footfall data
+# Merge the dataframes based on the 'nb_clus' column
+merged_data <- merge(nb_fs, lci, by = "nb_clus")
+merged_data <- merged_data %>% st_set_geometry(NULL)
+```
+
+
+```{r}
+# Load required library
+library(stats)
+
+# separate neighbourhoods based on liveability scores
+high_liveability <- merged_data[merged_data$li_exp >= median(merged_data$li_exp), c('nb_clus', 'li_exp', "weighted_avg_footfall")]
+low_liveability <- merged_data[merged_data$li_exp < median(merged_data$li_exp), c('nb_clus', 'li_exp', "weighted_avg_footfall")]
+
+# drop units
+# high_liveability$weighted_avg_footfall <- drop_units(high_liveability$weighted_avg_footfall)
+# low_liveability$weighted_avg_footfall <- drop_units(low_liveability$weighted_avg_footfall)
+
+
+# shapiro wilk test
+# Perform Shapiro-Wilk test for high liveability
+shapiro_test_group1 <- shapiro.test(high_liveability$weighted_avg_footfall)
+
+# Perform Shapiro-Wilk test for low liveability
+shapiro_test_group2 <- shapiro.test(low_liveability$weighted_avg_footfall)
+
+```
+The distribution of both groups was significantly different from normal distribution.
+
+
+```{r}
+# Print the test results for Group 1
+print(shapiro_test_group1)
+
+```
+
+```{r}
+# Print the test results for Group 2
+print(shapiro_test_group2)
+```
+
+
+```{r plot}
+# Load necessary libraries
+library(ggplot2)
+
+
+merged_data <- merged_data %>%
+  mutate(liveability_group = case_when(
+    li_exp >= median(li_exp) ~ 'High Liveability Neighbourhoods',
+    TRUE ~ 'Low Liveability Neighbourhoods'
+  ))
+
+mediantwogroups <- merged_data %>%
+  group_by(liveability_group) %>%
+  summarise(median = median(weighted_avg_footfall, na.rm = T))
+
+# Plot histograms
+plot <- ggplot(merged_data, aes(x = weighted_avg_footfall, color = liveability_group, fill = liveability_group)) +
+  geom_histogram(position = "identity", alpha = 0.3) +
+  geom_vline(data = mediantwogroups,
+             aes(xintercept = median,
+                 color = liveability_group),
+             linetype = 'dashed') +
+  
+  labs(x = "Normalised Footfall Scores", 
+       y = "Frequency", 
+       title = "Footfall Scores by Liveability Groups",
+       color = "Liveability Group", fill = "Liveability Group") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 13),
+        legend.title = element_text(size = 10, face = "bold"))
+
+ggsave('fs_by_groups.png', plot, dpi = 300, height = 5, width = 7)
+```
+
+
+
+```{r Mann Whitney Test}
+# Two independent groups
+# Perform Wilcoxon rank sum test (Mann-Whitney U test)
+wilcox_test_result <- wilcox.test(high_liveability$weighted_avg_footfall, low_liveability$weighted_avg_footfall)
+
+# Print the result
+print(wilcox_test_result)
+```
+In summary, based on the Mann-Whitney U test, we can confidently conclude that there is a statistically significant difference in footfall scores between neighbourhoods with high liveability scores and neighbourhoods with low liveability scores.
+
+```{r}
+# Calculate the U statistic from the test result
+u_statistic <- wilcox_test_result$statistic
+
+# Get the sample sizes
+n1 <- length(high_liveability$weighted_avg_footfall)
+n2 <- length(low_liveability$weighted_avg_footfall)
+
+# Calculate the effect size (r)
+effect_size_r <- u_statistic / (n1 * n2)
+
+# Print the effect size
+cat("Effect Size (r):", effect_size_r, "\n")
+
+```
+
+
+
+
+
+# 5. Correlation between Active Travel Frequency and LCI
+```{r}
+# correlation test
+cor.test(merged_data$weighted_avg_footfall, merged_data$li_exp,
+         conf.level = 0.99)
+```
+
+```{r linear regression}
+# Calculate the R-squared and RMSE (Root Mean Squared Error)
+lm_model <- lm(weighted_avg_footfall ~ li_exp, data = merged_data)
+tidy(lm_model)
+glance(lm_model)
+
+# RMSE
+predicted_values <- predict(lm_model)
+rmse <- sqrt(mean((merged_data$li_exp - predicted_values)^2))
+```
+
+```{r plot}
+# Create a scatter plot
+plot <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_footfall)) +
+  geom_jitter(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "dodgerblue2") +
+  xlab("LI score") +
+  ylab("Normalised Footfall Scores") +
+  ggtitle("Correlation between LI score and the Normalised Footfall score") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot
+
+ggsave('correlation_plot.png', plot, dpi = 300, width = 6, height = 6)
+```
+
+
+
+
+# Data Exploration
+```{r understanding columns of data}
+# number of unique H3-10
+length(unique(sample$hex_code)) # 120232
+
+# number of day type 
+length(unique(sample$day_type)) # thursday
+
+# number of unique movement modality - all, non-pedestrian, pedestrian
+length(unique(sample$movement_modality)) # 3
+unique(sample$movement_modality) 
+
+sum(sample$movement_modality == 'ALL') # 12023199 -  - visitation modality 'all', 'residents', 'transient', 'workers'
+sum(sample$movement_modality == "NON_PEDESTRIANS") # 3005800 - visitation modality 'all'
+sum(sample$movement_modality == "PEDESTRIANS") # 3005800 - visitation modality 'all'
+
+# number of visitation modality - residents, transient, workers, all
+length(unique(sample$visitation_modality))
+unique(sample$visitation_modality)
+sum(sample$visitation_modality == 'ALL') # 9017399
+sum(sample$visitation_modality == "RESIDENTS") # 3005800
+sum(sample$visitation_modality == "TRANSIENT") # 3005800 
+sum(sample$visitation_modality == "WORKERS") # 3005800
+
+# X0.0 - number of users
+length(unique(sample$num_users)) # 68
+max(sample$num_users) # range 0-109
+unique(sample$num_users)
+
+# X0.0.1 - number of signals
+length(unique(sample$num_signals)) # 288
+max(sample$num_signals) # range 0-468
+
+# X0.0.2 - Reach
+length(unique(sample$reach)) # 68
+max(sample$reach) # range 0-0.22
+
+# X0.0.3 - Dwell time
+length(unique(sample$dwell_time)) # 75658
+max(sample$dwell_time) # range 0-1
+
+# X0.0.4 - Footfall score
+length(unique(sample$footfall_score)) # 52862
+min(sample$footfall_score) # range 0 - 0.075
+
+# X0.0.5 - normalised Footfall score
+length(unique(sample$norm_footfall_score)) # 112473
+min(sample$norm_footfall_score) # range 0-100
+
+# X0.0.6 - Footfall score rank
+length(unique(sample$footfall_score_rank)) # 120536
+max(sample$footfall_score_rank) # range 0-1
+
+# X0.0.7 - Extrapolated number of users
+length(unique(sample$extrapolated_num_users)) # 288
+min(sample$extrapolated_num_users) # range 0-462541.7
+
+# X0.0.8 - extrapolated number of signals
+length(unique(sample$extrapolated_num_signals)) # 68
+max(sample$extrapolated_num_signals) # range 0-107728.7
+```
+
+
+
+

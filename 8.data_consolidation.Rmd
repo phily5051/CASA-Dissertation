@@ -1,0 +1,54 @@
+---
+title: "Data consolidation"
+output: html_document
+date: "2023-07-24"
+---
+
+# Packages
+```{r packages}
+library(tidyverse)
+library(sf)
+library(here)
+```
+
+# Isodistance 500m
+```{r read in data}
+diversity_500 <- read_csv(here::here('data', 'neighbourhood', 'diversity', '500m', 'diversity_500.csv')) 
+proximity_500 <- read_csv(here::here('data', 'neighbourhood', 'proximity', '500m', 'proximity_500.csv'))
+pop_density_500 <- read_csv(here::here('data', 'neighbourhood', 'pop_density', 'neighbourhood_500_pop_density_km.csv'))
+```
+
+```{r merge data}
+div_prox_500 <- diversity_500 %>% left_join(.,
+                                            proximity_500,
+                                            by = 'nb_clus')
+
+final_500 <- div_prox_500 %>% left_join(.,
+                                        pop_density_500,
+                                        by = 'nb_clus')
+
+# save data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/final_data/final_500.csv'
+write.csv(final_500, file_path, row.names = FALSE)
+```
+
+# Isodistance 600m
+```{r read in data}
+diversity_600 <- read_csv(here::here('data', 'neighbourhood', 'diversity', '600m', 'diversity_600.csv')) 
+proximity_600 <- read_csv(here::here('data', 'neighbourhood', 'proximity', '600m', 'proximity_600.csv'))
+pop_density_600 <- read_csv(here::here('data', 'neighbourhood', 'pop_density', 'neighbourhood_600_pop_density_km.csv'))
+```
+
+```{r merge data}
+div_prox_600 <- diversity_600 %>% left_join(.,
+                                            proximity_600,
+                                            by = 'nb_clus')
+
+final_600 <- div_prox_600 %>% left_join(.,
+                                        pop_density_600,
+                                        by = 'nb_clus')
+
+# save data
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/final_data/final_600.csv'
+write.csv(final_600, file_path, row.names = FALSE)
+```

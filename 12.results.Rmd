@@ -1,0 +1,1804 @@
+---
+title: "results"
+output: html_document
+date: "2023-08-01"
+---
+
+# 1. Packages
+```{r packages}
+# load packages
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(gtools)
+library(tmap)
+library(tmaptools)
+library(sf)
+library(here)
+library(janitor)
+```
+
+
+# 2. Data - 500m
+```{r}
+# london boundary
+london_boundary <- st_read(here::here("data","lsoa","london_boundary", "london_boundary.shp"))%>% st_transform(27700) %>% clean_names()
+
+# neighbourhood polygon at isochrone of 500m
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+
+boros <- st_read(here::here('data', 'boundary', 'London_Borough_Excluding_MHW.shp')) %>% st_transform(., 27700)
+
+# file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/boros.geojson'
+# st_write(boros, file_path, driver = 'GeoJSON')
+
+# LCI 
+lci <- read_csv(here::here('output', 'liveability_index_500.csv'))
+
+
+# left join nb_polygon and lci
+lci_1 <- left_join(lci,
+                   nb_polygon,
+                   by = 'nb_clus') %>%
+  st_as_sf()
+
+str(lci_1)
+```
+
+
+# 3. Plots
+## 3.1. LCI
+```{r OVerall Liverability Index Plot}
+# colour palette
+library(RColorBrewer)
+#colours = brewer.pal(name="RdYlGn", n=nlevels(lci_1$li_decile))
+
+# Reverse the 'viridis' color palette
+viridis_palette <- rev(viridisLite::viridis(10))
+
+# Create the map
+plot1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'li_decile', 
+              #palette = 'viridis',
+              #palette = viridis_palette,
+              palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Liveability Profiles of 1209 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot1
+tmap_save(plot1, 'LCI.png', height = 6, width = 8, dpi = 300)
+
+```
+
+## 3.2. Diversity Domain
+```{r Diversity Plot}
+# diversity 10 decile
+lci_1 <- lci_1 %>% mutate(div_decile = ntile(diversity_score, 10))
+# 
+# # proximity 10 decile
+lci_1 <- lci_1 %>% mutate(prox_decile = ntile(proximity_score, 10))
+# 
+# # population 10 decile
+lci_1 <- lci_1 %>% mutate(pop_decile = ntile(pop_density_exp, 10))
+
+
+# Create the map
+plot2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'div_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Diversity Domain Profiles of 1209 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot2
+tmap_save(plot2, 'diversity_domain.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+## 3.3. Proximity Domain
+```{r Proximity Plot}
+# Create the map
+plot3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'prox_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Proximity Domain Profiles of 1209 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot3
+tmap_save(plot3, 'proximity_domain.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+## 3.4. Population Density Domain
+```{r density Plot}
+# Create the map
+plot4 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'pop_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Population Density Domain Profiles of 1209 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot4
+tmap_save(plot4, 'density_domain.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+```{r OVerall Three Domain Plots}
+# diversity 10 decile
+lci_1 <- lci_1 %>% mutate(div_decile = ntile(diversity_score, 10))
+# 
+# # proximity 10 decile
+lci_1 <- lci_1 %>% mutate(prox_decile = ntile(proximity_score, 10))
+# 
+# # population 10 decile
+lci_1 <- lci_1 %>% mutate(pop_decile = ntile(pop_density_exp, 10))
+
+# tmap mode
+tmap_mode('plot')
+
+# plot each map
+tm1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'div_decile', 
+              palette = "RdYlGn",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(frame = F,
+            title = 'Diversity Domain',
+            title.position = c('center', 'top'))
+
+
+tm2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'prox_decile', 
+              palette = "RdYlGn",
+              style = 'cat') +
+  tm_legend(show = F) +
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(frame = F,
+            title = 'Proximity Domain',
+            title.position = c('center', 'top'))
+
+tm3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'pop_decile', 
+              palette = "RdYlGn", 
+              style = 'cat') +
+  tm_legend(show = F) +
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(frame = F,
+            title = 'Population Density Domain',
+            title.position = c('center', 'top'))
+# 
+legend <- tm_shape(lci_1) +
+  tm_polygons('div_decile',
+              palette = 'RdYlGn',
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(north=0, position=c(0.78, 0.7))+
+  tm_layout(legend.only = T,
+            legend.position = c(0.8, .1), 
+            legend.height = 2.5,
+            legend.width = 2,
+            asp = 0.1)
+
+
+
+t = tmap_arrange(tm1,legend, tm2, tm3, ncol=2)
+
+t
+tmap_save(t, 'domain_maps.png', height = 8, width = 8, dpi = 300)
+
+```
+
+
+
+
+
+
+
+
+
+
+# 4. Decomposition of Indicators
+## 4.1. Assign neighbourhoods to LAD
+```{r}
+# Step 1: Perform spatial intersection
+intersection <- st_intersection(nb_polygon, boros) # 1551 observations
+
+# Step 2: Determine the borough with the largest intersection area for each neighborhood
+nb_polygon$LAD <- sapply(1:nrow(nb_polygon), function(i) {
+  
+  intersected_boroughs <- intersection$NAME[intersection$nb_clus == nb_polygon$nb_clus[i]]
+  
+  if (length(intersected_boroughs) > 0) {
+    # Get the borough with the largest intersection area
+    borough_with_max_area <- intersected_boroughs[which.max(intersection$geometry[intersection$nb_clus == nb_polygon$nb_clus[i]] %>% st_area())]
+    
+    return(borough_with_max_area)
+  } else {
+    # Handle neighborhoods that do not intersect with any borough
+    return(NA)
+  }
+})
+
+# check whether there is any neighbourhood that is not assigned of boroughs
+sum(is.na(nb_polygon$LAD)) # all neighbourhoods have been assigned to boroughs
+```
+
+## 4.2. Group by boroughs
+```{r}
+nb_polygon_df <- nb_polygon %>% st_set_geometry(NULL)
+
+# left join with LCI
+lci_2 <- left_join(lci,
+                   nb_polygon_df,
+                   by = 'nb_clus')
+
+#
+lci_per_borough <- lci_2 %>%
+  group_by(LAD) %>%
+  summarise(mean_d_c_score = mean(d_c_exp),
+            mean_d_edu_score = mean(d_edu_exp),
+            mean_d_enter_score = mean(d_enter_exp),
+            mean_d_l_score = mean(d_l_exp),
+            mean_d_h_score = mean(d_h_exp),
+            mean_p_c_score = mean(p_c_exp),
+            mean_p_edu_score = mean(p_edu_exp),
+            mean_p_enter_score = mean(p_enter_exp),
+            mean_p_l_score = mean(p_l_exp),
+            mean_p_h_score = mean(p_h_exp),
+            mean_den_score = mean(pop_density_exp),
+            mean_li_score = mean(li_exp)) %>% select(-mean_li_score)
+
+# average liverability score sums upto individual indicator scores
+# All indicator values are standardised and 1/11 is equal weights of individual indicators.
+# lci_per_borough$mean_li_score <- (lci_per_borough$mean_d_c_score/11) + (lci_per_borough$mean_d_edu_score/11) + (lci_per_borough$mean_d_enter_score/11) + (lci_per_borough$mean_d_l_score/11) + (lci_per_borough$mean_d_h_score/11) + (lci_per_borough$mean_p_c_score/11) + (lci_per_borough$mean_p_edu_score/11) + (lci_per_borough$mean_p_enter_score/11) + (lci_per_borough$mean_p_l_score/11) + (lci_per_borough$mean_p_h_score/11) + (lci_per_borough$mean_den_score/11)
+
+
+# multiply individual weights
+lci_per_borough$mean_d_c_score <- lci_per_borough$mean_d_c_score * 1/11
+lci_per_borough$mean_d_edu_score <- lci_per_borough$mean_d_edu_score * 1/11
+lci_per_borough$mean_d_enter_score <- lci_per_borough$mean_d_enter_score * 1/11
+lci_per_borough$mean_d_l_score <- lci_per_borough$mean_d_l_score * 1/11
+lci_per_borough$mean_d_h_score <- lci_per_borough$mean_d_h_score * 1/11
+lci_per_borough$mean_den_score <- lci_per_borough$mean_den_score * 1/11
+lci_per_borough$mean_p_c_score <- lci_per_borough$mean_p_c_score * 1/11
+lci_per_borough$mean_p_edu_score <- lci_per_borough$mean_p_edu_score * 1/11
+lci_per_borough$mean_p_enter_score <- lci_per_borough$mean_p_enter_score * 1/11
+lci_per_borough$mean_p_l_score <- lci_per_borough$mean_p_l_score * 1/11
+lci_per_borough$mean_p_h_score <- lci_per_borough$mean_p_h_score * 1/11
+
+# sum
+lci_per_borough$mean_li_score <- (lci_per_borough$mean_d_c_score) + (lci_per_borough$mean_d_edu_score) + (lci_per_borough$mean_d_enter_score) + (lci_per_borough$mean_d_l_score) + (lci_per_borough$mean_d_h_score) + (lci_per_borough$mean_p_c_score) + (lci_per_borough$mean_p_edu_score) + (lci_per_borough$mean_p_enter_score) + (lci_per_borough$mean_p_l_score) + (lci_per_borough$mean_p_h_score) + (lci_per_borough$mean_den_score)
+
+# diversity ratio
+lci_per_borough$diversity_ratio <- (lci_per_borough$mean_d_c_score + lci_per_borough$mean_d_edu_score + lci_per_borough$mean_d_enter_score + lci_per_borough$mean_d_l_score + lci_per_borough$mean_d_h_score) / lci_per_borough$mean_li_score
+
+# proximity
+lci_per_borough$proximity_ratio <- (lci_per_borough$mean_p_c_score + lci_per_borough$mean_p_edu_score + lci_per_borough$mean_p_enter_score + lci_per_borough$mean_p_l_score + lci_per_borough$mean_p_h_score) / lci_per_borough$mean_li_score
+
+# density
+lci_per_borough$density_ratio <- lci_per_borough$mean_den_score/lci_per_borough$mean_li_score
+
+# Arrange dataframe in descending order based on mean_li_score
+lci_per_borough <- lci_per_borough %>%
+  arrange(desc(mean_li_score))
+```
+
+## 4.3. LAD Decomposition Plot
+```{r}
+library(ggplot2)
+
+# Define the legend names
+legend_names <- c("mean_d_c_score" = "Diversity of Commerce",
+                  "mean_d_edu_score" = "Diversity of Education",
+                  "mean_d_enter_score" = "Diversity of Entertainment",
+                  "mean_d_l_score" = "Diversity of Living",
+                  "mean_d_h_score" = "Diversity of Healthcare",
+                  "mean_p_c_score" = "Proximity to Commerce",
+                  "mean_p_edu_score" = "Proximity to Education",
+                  "mean_p_enter_score" = "Proximity to Entertainment",
+                  "mean_p_l_score" = "Proximity to Living",
+                  "mean_p_h_score" = "Proximity to Healthcare",
+                  "mean_den_score" = "Population Density")
+
+# Calculate the sum of indicators for each borough
+lci_per_borough$sum_indicators <- rowSums(select(lci_per_borough, starts_with("mean_")))
+
+# Reorder the levels of LAD based on the sum of indicators
+lci_per_borough$LAD <- factor(lci_per_borough$LAD, levels = lci_per_borough$LAD[order(lci_per_borough$sum_indicators)])
+
+# Reshape the data from wide to long format
+lci_long <- lci_per_borough %>%
+  pivot_longer(cols = starts_with("mean_"), names_to = "Indicator", values_to = "value")
+
+
+```
+
+
+```{r LAD Decomposed}
+# Create the stacked bar chart
+plot5 <- ggplot(lci_long, aes(x = LAD, y = value, fill = Indicator)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "London Boroughs (LAD)", y = "Indicator Value") +
+  ggtitle("Decomposition of Liveability Index into 11 Indicators") +
+  scale_fill_discrete(name = 'Indicator', labels = legend_names) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 15, family = 'sans'),
+        plot.margin = margin(30, 0, 50, 0))
+
+
+plot5
+ggsave('decomposed_LCI.png', plot5, height = 10, width = 10, dpi = 300)
+```
+
+## 4.4. Normalisation of Indicator Scores - Top 3 Boroughs
+```{r Top 3 Decomposed}
+# Find the maximum score for each indicator
+max_scores <- lci_long %>%
+  group_by(Indicator) %>%
+  summarise(max_score = max(value))
+
+# Calculate the proportion of each indicator score relative to the maximum score
+lci_long <- lci_long %>%
+  left_join(max_scores, by = "Indicator") %>%
+  mutate(proportion = value / max_score)
+
+# Select the top 3 boroughs with the highest sum of indicator scores
+top_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  head(3)
+
+bottom_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  tail(3)
+
+
+# Filter data for the top 3 boroughs
+top_3_data <- lci_long %>%
+  filter(LAD %in% top_3_boroughs$LAD)
+
+
+library(dplyr)
+
+# Recode the Indicator column with custom names
+top_3_data <- top_3_data %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+
+# Create a single plot with shared y-axis in one row and three columns
+plot_combined <- ggplot(top_3_data, aes(x = Indicator, y = proportion, fill = Indicator)) +
+  geom_bar(stat = "identity") +
+  xlab('Indicator') +
+  ylab("Indicator Proportion") +
+  ggtitle("Decomposed Liveability Index for Top-Ranked 3 Boroughs") +
+  scale_fill_discrete(name = 'Indicator') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),  # Add margins (top, right, bottom, left) to axis labels
+        axis.text.y = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),
+        strip.background = element_rect(color = "black", fill = "grey90"),  # Add a panel around strip (LAD titles)
+        
+        strip.text = element_text(size =20, family = 'sans', face = 'bold'),  # Increase font size and add margin below the strip text
+        axis.title = element_text(size = 20, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0), face = 'bold'),  # Add margins (top, right, bottom, left) to axis titles
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 26, family = 'sans', margin = margin(b = 20)),  # Add margin below the plot title
+        plot.margin = unit(c(1, 1, 2, 1), "lines"),  # Adjust the plot margins (top, right, bottom, left)
+        panel.spacing = unit(1.5, "lines")) +  # Adjust the margin between plots
+  facet_grid(. ~ LAD, scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_continuous(limits = c(0, 1)) +  # Set the y-axis limits to 0 and 1
+  coord_flip() +
+  guides(fill = FALSE)  # Remove the legend
+
+# Display the combined plot
+print(plot_combined)
+
+
+
+ggsave('top3_decomposed_500.png' ,plot_combined, dpi = 300, width = 18, height = 10)
+```
+
+## 4.5. Normalisation of Indicator Scores - Bottom 3 Boroughs
+```{r Top 3 Decomposed}
+bottom_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  tail(3)
+
+
+# Filter data for the bottom 3 boroughs
+bottom_3_data <- lci_long %>%
+  filter(LAD %in% bottom_3_boroughs$LAD)
+
+
+library(dplyr)
+
+# Recode the Indicator column with custom names
+bottom_3_data <- bottom_3_data %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+
+# Create a single plot with shared y-axis in one row and three columns
+plot_combined <- ggplot(bottom_3_data, aes(x = Indicator, y = proportion, fill = Indicator)) +
+  geom_bar(stat = "identity") +
+  xlab('Indicator') +
+  ylab("Indicator Proportion") +
+  ggtitle("Decomposed Liveability Index for Bottom-Ranked 3 Boroughs") +
+  scale_fill_discrete(name = 'Indicator') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),  # Add margins (top, right, bottom, left) to axis labels
+        axis.text.y = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),
+        strip.background = element_rect(color = "black", fill = "grey90"),
+        strip.text = element_text(size = 20, family = 'sans', face = 'bold'),  # Increase font size and add margin below the strip text
+        axis.title = element_text(size = 20, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0), face = 'bold'),  # Add margins (top, right, bottom, left) to axis titles
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 26, family = 'sans', margin = margin(b = 20)),  # Add margin below the plot title
+        plot.margin = unit(c(1, 1, 2, 1), "lines"),  # Adjust the plot margins (top, right, bottom, left)
+        panel.spacing = unit(1.5, "lines")) +  # Adjust the margin between plots
+  facet_grid(. ~ LAD, scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_continuous(limits = c(0, 1)) +  # Set the y-axis limits to 0 and 1
+  coord_flip() +
+  guides(fill = FALSE)  # Remove the legend
+
+# Display the combined plot
+print(plot_combined)
+
+
+
+ggsave('bottom3_decomposed_500.png' ,plot_combined, dpi = 300, width = 18, height = 10)
+```
+## 4.6. Proportional Contribution
+```{r give weights to each individual sub indicator}
+#
+lci_3 <- lci_2 %>% select(-c(li_rank, li_score, li_exp, li_decile, LAD)) %>%
+  group_by(nb_clus) %>%
+  summarise(mean_d_c_score = mean(d_c_exp),
+            mean_d_edu_score = mean(d_edu_exp),
+            mean_d_enter_score = mean(d_enter_exp),
+            mean_d_l_score = mean(d_l_exp),
+            mean_d_h_score = mean(d_h_exp),
+            mean_p_c_score = mean(p_c_exp),
+            mean_p_edu_score = mean(p_edu_exp),
+            mean_p_enter_score = mean(p_enter_exp),
+            mean_p_l_score = mean(p_l_exp),
+            mean_p_h_score = mean(p_h_exp),
+            mean_den_score = mean(pop_density_exp))
+
+# average liverability score sums upto individual indicator scores
+# All indicator values are standardised and 1/11 is equal weights of individual indicators.
+# lci_per_borough$mean_li_score <- (lci_per_borough$mean_d_c_score/11) + (lci_per_borough$mean_d_edu_score/11) + (lci_per_borough$mean_d_enter_score/11) + (lci_per_borough$mean_d_l_score/11) + (lci_per_borough$mean_d_h_score/11) + (lci_per_borough$mean_p_c_score/11) + (lci_per_borough$mean_p_edu_score/11) + (lci_per_borough$mean_p_enter_score/11) + (lci_per_borough$mean_p_l_score/11) + (lci_per_borough$mean_p_h_score/11) + (lci_per_borough$mean_den_score/11)
+
+
+# multiply individual weights
+lci_3$mean_d_c_score <- lci_3$mean_d_c_score * 1/11
+lci_3$mean_d_edu_score <- lci_3$mean_d_edu_score * 1/11
+lci_3$mean_d_enter_score <- lci_3$mean_d_enter_score * 1/11
+lci_3$mean_d_l_score <- lci_3$mean_d_l_score * 1/11
+lci_3$mean_d_h_score <- lci_3$mean_d_h_score * 1/11
+lci_3$mean_den_score <- lci_3$mean_den_score * 1/11
+lci_3$mean_p_c_score <- lci_3$mean_p_c_score * 1/11
+lci_3$mean_p_edu_score <- lci_3$mean_p_edu_score * 1/11
+lci_3$mean_p_enter_score <- lci_3$mean_p_enter_score * 1/11
+lci_3$mean_p_l_score <- lci_3$mean_p_l_score * 1/11
+lci_3$mean_p_h_score <- lci_3$mean_p_h_score * 1/11
+```
+
+```{r data format to long pivot}
+# Define the legend names
+legend_names <- c("mean_d_c_score" = "Diversity of Commerce",
+                  "mean_d_edu_score" = "Diversity of Education",
+                  "mean_d_enter_score" = "Diversity of Entertainment",
+                  "mean_d_l_score" = "Diversity of Living",
+                  "mean_d_h_score" = "Diversity of Healthcare",
+                  "mean_p_c_score" = "Proximity to Commerce",
+                  "mean_p_edu_score" = "Proximity to Education",
+                  "mean_p_enter_score" = "Proximity to Entertainment",
+                  "mean_p_l_score" = "Proximity to Living",
+                  "mean_p_h_score" = "Proximity to Healthcare",
+                  "mean_den_score" = "Population Density")
+
+# Calculate the sum of indicators for each borough
+lci_3$sum_indicators <- rowSums(select(lci_3, starts_with("mean_")))
+
+
+# Reshape the data from wide to long format
+lci_long <- lci_3 %>%
+  pivot_longer(cols = starts_with("mean_"), names_to = "Indicator", values_to = "value")
+```
+
+```{r normalisation by dividing by the highest score per indicator}
+# Find the maximum score for each indicator - maximum score is 100/11 as the maximum score of exponentially transformed data is 100. And we divided by 11 to give each individual equal weights
+max_scores <- lci_long %>%
+  group_by(Indicator) %>%
+  summarise(max_score = max(value))
+
+# Calculate the proportion of each indicator score relative to the maximum score
+lci_long <- lci_long %>%
+  left_join(max_scores, by = "Indicator") %>%
+  mutate(proportion = value / max_score)
+
+# embed neighbourhood polygons
+nb_polygon <- nb_polygon %>% select(-LAD)
+
+# merge nb_polygon and lci_data
+lci_long_sf <- lci_long %>%
+  left_join(.,
+            nb_polygon,
+            by = 'nb_clus') %>% st_as_sf()
+
+# double check the class
+str(lci_long_sf)
+
+# proportion category
+lci_long_sf <- lci_long_sf %>%
+  mutate(prop_decile = cut(proportion, breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+                           labels = c("0.0 - 0.1", "0.1 - 0.2", "0.2 - 0.3", "0.3 - 0.4", "0.4 - 0.5",
+                                      "0.5 - 0.6", "0.6 - 0.7", "0.7 - 0.8", "0.8 - 0.9", "0.9 - 1.0"),
+                           include.lowest = TRUE))
+
+# Now the lci_long_sf dataframe has the 'prop_decile' column
+
+# Recode the Indicator column with custom names
+lci_long_sf <- lci_long_sf %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/lci_long_sf.geojson'
+st_write(lci_long_sf, file_path, driver = 'GeoJSON')
+```
+
+```{r proportional contribution of each indicator to final index}
+# Find the maximum score for each indicator - maximum score is 100/11 as the maximum score of exponentially transformed data is 100. And we divided by 11 to give each individual equal weights
+
+# Calculate the proportion of each indicator score relative to the maximum score
+lci_long <- lci_long %>%
+  mutate(proportion = value / sum_indicators)
+
+# embed neighbourhood polygons
+nb_polygon <- nb_polygon %>% select(-LAD)
+
+# merge nb_polygon and lci_data
+lci_long_sf <- lci_long %>%
+  left_join(.,
+            nb_polygon,
+            by = 'nb_clus') %>% st_as_sf()
+
+# double check the class
+str(lci_long_sf)
+
+# proportion category
+lci_long_sf <- lci_long_sf %>%
+  mutate(prop_decile = cut(proportion, breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5),
+                           labels = c("0.0 - 0.05", "0.05 - 0.1", "0.1 - 0.15", "0.15 - 0.2", "0.2 - 0.25",
+                                      "0.25 - 0.3", "0.3 - 0.35", "0.35 - 0.4", "0.4 - 0.45", "0.45 - 0.5"),
+                           include.lowest = TRUE))
+
+# Now the lci_long_sf dataframe has the 'prop_decile' column
+
+# Recode the Indicator column with custom names
+lci_long_sf <- lci_long_sf %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/lci_long_sf.geojson'
+st_write(lci_long_sf, file_path, driver = 'GeoJSON')
+```
+
+
+
+```{r diversity}
+# filter diversity domain subindicators
+diversity_norm <- lci_long_sf %>%
+  filter(str_detect(`Indicator`, 'Diversity'))
+
+# Create the map plots
+# plot each map
+tm1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Commerce')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+ 
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Commerce')
+
+
+  
+tm2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Education')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Education')
+  
+  
+  
+tm3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Entertainment')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Entertainment')  
+
+  
+  
+tm4 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Living')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Living')
+
+  
+tm5 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Healthcare')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Healthcare')  
+
+# legend
+legend <- tm_shape(lci_long_sf) +
+  tm_polygons('prop_decile',
+              palette = 'viridis',
+              title = 'Proportion',
+              style = 'cat') +
+  tm_layout(legend.only = T,
+            legend.position = c('center', 'center'), 
+            legend.height = 3.5,
+            legend.width = 4,
+            asp = 0.1)
+
+
+t = tmap_arrange(tm1, tm2, tm3, tm4, tm5, legend, ncol=2)
+
+
+t
+
+tmap_save(t, 'diversity_normalised.png', height = 10, width = 8, dpi = 300)
+
+```
+
+```{r Proximity proportion}
+# Create the map plots
+# plot each map
+tm1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Commerce')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+ 
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Commerce')
+
+
+  
+tm2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Education')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Education')
+  
+  
+  
+tm3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Entertainment')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Entertainment')  
+
+  
+  
+tm4 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Living')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Living')
+
+  
+tm5 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Healthcare')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Healthcare')  
+
+# legend
+legend <- tm_shape(lci_long_sf) +
+  tm_polygons('prop_decile',
+              palette = 'viridis',
+              title = 'Proportion',
+              style = 'cat') +
+  tm_layout(legend.only = T,
+            legend.position = c('center', 'center'), 
+            legend.height = 3.5,
+            legend.width = 4,
+            asp = 0.1)
+
+
+t = tmap_arrange(tm1, tm2, tm3, tm4, tm5, legend, ncol=2)
+
+t
+
+tmap_save(t, 'proximity_normalised.png', height = 10, width = 8, dpi = 300)
+
+```
+
+```{r population density}
+# Create the map
+plot <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_long_sf %>% filter(Indicator == 'Population Density')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              title = 'Proportion',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) + 
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Population Density')
+
+
+plot
+tmap_save(plot, 'population_normalised.png', height = 6, width = 8, dpi = 300)
+```
+
+
+
+# 5. Data - 600m
+```{r}
+# london boundary
+london_boundary <- st_read(here::here("data","lsoa","london_boundary", "london_boundary.shp"))%>% st_transform(27700) %>% clean_names()
+
+# neighbourhood polygon at isochrone of 500m
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_600.geojson')) %>% st_transform(27700)
+
+boros <- st_read(here::here('data', 'boundary', 'London_Borough_Excluding_MHW.shp')) %>% st_transform(., 27700)
+
+# LCI 
+lci <- read_csv(here::here('output', 'liveability_index_600.csv'))
+
+
+# left join nb_polygon and lci
+lci_1 <- left_join(lci,
+                   nb_polygon,
+                   by = 'nb_clus') %>%
+  st_as_sf()
+
+str(lci_1)
+```
+
+
+# 6. Plots
+## 6.1. LCI
+```{r OVerall Liverability Index Plot}
+# colour palette
+library(RColorBrewer)
+#colours = brewer.pal(name="RdYlGn", n=nlevels(lci_1$li_decile))
+
+# Reverse the 'viridis' color palette
+viridis_palette <- rev(viridisLite::viridis(10))
+
+# Create the map
+plot1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'li_decile', 
+              #palette = 'viridis',
+              #palette = viridis_palette,
+              palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Liveability Profiles of 864 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot1
+tmap_save(plot1, 'LCI_600.png', height = 6, width = 8, dpi = 300)
+
+```
+
+## 6.2. Diversity Domain
+```{r Diversity Plot}
+# diversity 10 decile
+lci_1 <- lci_1 %>% mutate(div_decile = ntile(diversity_score, 10))
+# 
+# # proximity 10 decile
+lci_1 <- lci_1 %>% mutate(prox_decile = ntile(proximity_score, 10))
+# 
+# # population 10 decile
+lci_1 <- lci_1 %>% mutate(pop_decile = ntile(pop_density_exp, 10))
+
+# Create the map
+plot2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'div_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Diversity Domain Profiles of 864 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot2
+tmap_save(plot2, 'diversity_domain_600.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+## 6.3. Proximity Domain
+```{r Proximity Plot}
+# Create the map
+plot3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'prox_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Proximity Domain Profiles of 864 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot3
+tmap_save(plot3, 'proximity_domain_600.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+## 6.4. Population Density Domain
+```{r density Plot}
+# Create the map
+plot4 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'pop_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Population Density Domain Profiles of 864 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot4
+tmap_save(plot4, 'density_domain_600.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+```{r OVerall Three Domain Plots}
+# diversity 10 decile
+# lci_1 <- lci_1 %>% mutate(div_decile = ntile(diversity_score, 10))
+# 
+# # proximity 10 decile
+# lci_1 <- lci_1 %>% mutate(prox_decile = ntile(proximity_score, 10))
+# 
+# # population 10 decile
+# lci_1 <- lci_1 %>% mutate(pop_decile = ntile(pop_density_exp, 10))
+
+# tmap mode
+tmap_mode('plot')
+
+# plot each map
+tm1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'div_decile', 
+              palette = "RdYlGn",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(frame = F,
+            title = 'Diversity Domain',
+            title.position = c('center', 'top'))
+
+
+tm2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'prox_decile', 
+              palette = "RdYlGn",
+              style = 'cat') +
+  tm_legend(show = F) +
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(frame = F,
+            title = 'Proximity Domain',
+            title.position = c('center', 'top'))
+
+tm3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'pop_decile', 
+              palette = "RdYlGn", 
+              style = 'cat') +
+  tm_legend(show = F) +
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(frame = F,
+            title = 'Population Density Domain',
+            title.position = c('center', 'top'))
+# 
+legend <- tm_shape(lci_1) +
+  tm_polygons('div_decile',
+              palette = 'RdYlGn',
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(north=0, position=c(0.78, 0.7))+
+  tm_layout(legend.only = T,
+            legend.position = c(0.8, .1), 
+            legend.height = 2.5,
+            legend.width = 2,
+            asp = 0.1)
+
+
+
+t = tmap_arrange(tm1,legend, tm2, tm3, ncol=2)
+
+t
+tmap_save(t, 'domain_maps.png', height = 8, width = 8, dpi = 300)
+
+```
+
+
+
+
+
+
+
+
+
+
+# 7. Decomposition of Indicators
+## 7.1. Assign neighbourhoods to LAD
+```{r}
+# Step 1: Perform spatial intersection
+intersection <- st_intersection(nb_polygon, boros) # 1188 observations
+
+# Step 2: Determine the borough with the largest intersection area for each neighborhood
+nb_polygon$LAD <- sapply(1:nrow(nb_polygon), function(i) {
+  
+  intersected_boroughs <- intersection$NAME[intersection$nb_clus == nb_polygon$nb_clus[i]]
+  
+  if (length(intersected_boroughs) > 0) {
+    # Get the borough with the largest intersection area
+    borough_with_max_area <- intersected_boroughs[which.max(intersection$geometry[intersection$nb_clus == nb_polygon$nb_clus[i]] %>% st_area())]
+    
+    return(borough_with_max_area)
+  } else {
+    # Handle neighborhoods that do not intersect with any borough
+    return(NA)
+  }
+})
+
+# check whether there is any neighbourhood that is not assigned of boroughs
+sum(is.na(nb_polygon$LAD)) # all neighbourhoods have been assigned to boroughs
+```
+
+## 7.2. Group by boroughs
+```{r}
+nb_polygon_df <- nb_polygon %>% st_set_geometry(NULL)
+
+# left join with LCI
+lci_2 <- left_join(lci,
+                   nb_polygon_df,
+                   by = 'nb_clus')
+
+#
+lci_per_borough <- lci_2 %>%
+  group_by(LAD) %>%
+  summarise(mean_d_c_score = mean(d_c_exp),
+            mean_d_edu_score = mean(d_edu_exp),
+            mean_d_enter_score = mean(d_enter_exp),
+            mean_d_l_score = mean(d_l_exp),
+            mean_d_h_score = mean(d_h_exp),
+            mean_p_c_score = mean(p_c_exp),
+            mean_p_edu_score = mean(p_edu_exp),
+            mean_p_enter_score = mean(p_enter_exp),
+            mean_p_l_score = mean(p_l_exp),
+            mean_p_h_score = mean(p_h_exp),
+            mean_den_score = mean(pop_density_exp),
+            mean_li_score = mean(li_score)) %>% select(-mean_li_score)
+
+# average liverability score sums upto individual indicator scores
+# All indicator values are standardised and 1/11 is equal weights of individual indicators.
+# lci_per_borough$mean_li_score <- (lci_per_borough$mean_d_c_score/11) + (lci_per_borough$mean_d_edu_score/11) + (lci_per_borough$mean_d_enter_score/11) + (lci_per_borough$mean_d_l_score/11) + (lci_per_borough$mean_d_h_score/11) + (lci_per_borough$mean_p_c_score/11) + (lci_per_borough$mean_p_edu_score/11) + (lci_per_borough$mean_p_enter_score/11) + (lci_per_borough$mean_p_l_score/11) + (lci_per_borough$mean_p_h_score/11) + (lci_per_borough$mean_den_score/11)
+
+
+# multiply individual weights
+lci_per_borough$mean_d_c_score <- lci_per_borough$mean_d_c_score * 1/11
+lci_per_borough$mean_d_edu_score <- lci_per_borough$mean_d_edu_score * 1/11
+lci_per_borough$mean_d_enter_score <- lci_per_borough$mean_d_enter_score * 1/11
+lci_per_borough$mean_d_l_score <- lci_per_borough$mean_d_l_score * 1/11
+lci_per_borough$mean_d_h_score <- lci_per_borough$mean_d_h_score * 1/11
+lci_per_borough$mean_den_score <- lci_per_borough$mean_den_score * 1/11
+lci_per_borough$mean_p_c_score <- lci_per_borough$mean_p_c_score * 1/11
+lci_per_borough$mean_p_edu_score <- lci_per_borough$mean_p_edu_score * 1/11
+lci_per_borough$mean_p_enter_score <- lci_per_borough$mean_p_enter_score * 1/11
+lci_per_borough$mean_p_l_score <- lci_per_borough$mean_p_l_score * 1/11
+lci_per_borough$mean_p_h_score <- lci_per_borough$mean_p_h_score * 1/11
+```
+
+## 7.3. LAD Decomposition Plot
+```{r}
+library(ggplot2)
+
+# Define the legend names
+legend_names <- c("mean_d_c_score" = "Diversity of Commerce",
+                  "mean_d_edu_score" = "Diversity of Education",
+                  "mean_d_enter_score" = "Diversity of Entertainment",
+                  "mean_d_l_score" = "Diversity of Living",
+                  "mean_d_h_score" = "Diversity of Healthcare",
+                  "mean_p_c_score" = "Proximity to Commerce",
+                  "mean_p_edu_score" = "Proximity to Education",
+                  "mean_p_enter_score" = "Proximity to Entertainment",
+                  "mean_p_l_score" = "Proximity to Living",
+                  "mean_p_h_score" = "Proximity to Healthcare",
+                  "mean_den_score" = "Population Density")
+
+# Calculate the sum of indicators for each borough
+lci_per_borough$sum_indicators <- rowSums(select(lci_per_borough, starts_with("mean_")))
+
+# Reorder the levels of LAD based on the sum of indicators
+lci_per_borough$LAD <- factor(lci_per_borough$LAD, levels = lci_per_borough$LAD[order(lci_per_borough$sum_indicators)])
+
+# Reshape the data from wide to long format
+lci_long <- lci_per_borough %>%
+  pivot_longer(cols = starts_with("mean_"), names_to = "Indicator", values_to = "value")
+
+
+```
+
+
+```{r LAD Decomposed}
+# Create the stacked bar chart
+plot5 <- ggplot(lci_long, aes(x = LAD, y = value, fill = Indicator)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "London Boroughs (LAD)", y = "Indicator Value") +
+  ggtitle("Decomposition of Liveability Index into 11 Indicators") +
+  scale_fill_discrete(name = 'Indicator', labels = legend_names) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 15, family = 'sans'),
+        plot.margin = margin(30, 0, 50, 0))
+
+
+plot5
+ggsave('decomposed_LCI_600.png', plot5, height = 10, width = 10, dpi = 300)
+```
+## 7.4. Normalisation of Indicator Scores - Top 3 Boroughs
+```{r Top 3 Decomposed}
+# Find the maximum score for each indicator
+max_scores <- lci_long %>%
+  group_by(Indicator) %>%
+  summarise(max_score = max(value))
+
+# Calculate the proportion of each indicator score relative to the maximum score
+lci_long <- lci_long %>%
+  left_join(max_scores, by = "Indicator") %>%
+  mutate(proportion = value / max_score)
+
+# Select the top 3 boroughs with the highest sum of indicator scores
+top_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  head(3)
+
+bottom_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  tail(3)
+
+
+# Filter data for the top 3 boroughs
+top_3_data <- lci_long %>%
+  filter(LAD %in% top_3_boroughs$LAD)
+
+
+library(dplyr)
+
+# Recode the Indicator column with custom names
+top_3_data <- top_3_data %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+
+# Create a single plot with shared y-axis in one row and three columns
+plot_combined <- ggplot(top_3_data, aes(x = Indicator, y = proportion, fill = Indicator)) +
+  geom_bar(stat = "identity") +
+  xlab('Indicator') +
+  ylab("Indicator Proportion") +
+  ggtitle("Decomposed Liveability Index for Top-Ranked 3 Boroughs") +
+  scale_fill_discrete(name = 'Indicator') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),  # Add margins (top, right, bottom, left) to axis labels
+        axis.text.y = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),
+        strip.background = element_rect(color = "black", fill = "grey90"),
+        strip.text = element_text(size = 20, family = 'sans', face = 'bold'),  # Increase font size and add margin below the strip text
+        axis.title = element_text(size = 20, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0), face = 'bold'),  # Add margins (top, right, bottom, left) to axis titles
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 26, family = 'sans', margin = margin(b = 20)),  # Add margin below the plot title
+        plot.margin = unit(c(1, 1, 2, 1), "lines"),  # Adjust the plot margins (top, right, bottom, left)
+        panel.spacing = unit(1.5, "lines")) +  # Adjust the margin between plots
+  facet_grid(. ~ LAD, scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_continuous(limits = c(0, 1)) +  # Set the y-axis limits to 0 and 1
+  coord_flip() +
+  guides(fill = FALSE)  # Remove the legend
+
+# Display the combined plot
+print(plot_combined)
+
+
+
+ggsave('top3_decomposed_600.png' ,plot_combined, dpi = 300, width = 18, height = 10)
+```
+
+## 7.5. Normalisation of Indicator Scores - Bottom 3 Boroughs
+```{r Top 3 Decomposed}
+bottom_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  tail(3)
+
+
+# Filter data for the bottom 3 boroughs
+bottom_3_data <- lci_long %>%
+  filter(LAD %in% bottom_3_boroughs$LAD)
+
+
+library(dplyr)
+
+# Recode the Indicator column with custom names
+bottom_3_data <- bottom_3_data %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+
+# Create a single plot with shared y-axis in one row and three columns
+plot_combined <- ggplot(bottom_3_data, aes(x = Indicator, y = proportion, fill = Indicator)) +
+  geom_bar(stat = "identity") +
+  xlab('Indicator') +
+  ylab("Indicator Proportion") +
+  ggtitle("Decomposed Liveability Index for Bottom-Ranked 3 Boroughs") +
+  scale_fill_discrete(name = 'Indicator') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),  # Add margins (top, right, bottom, left) to axis labels
+        axis.text.y = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),
+        strip.background = element_rect(color = "black", fill = "grey90"),
+        strip.text = element_text(size = 20, family = 'sans', face = 'bold'),  # Increase font size and add margin below the strip text
+        axis.title = element_text(size = 20, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0), face = 'bold'),  # Add margins (top, right, bottom, left) to axis titles
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 26, family = 'sans', margin = margin(b = 20)),  # Add margin below the plot title
+        plot.margin = unit(c(1, 1, 2, 1), "lines"),  # Adjust the plot margins (top, right, bottom, left)
+        panel.spacing = unit(1.5, "lines")) +  # Adjust the margin between plots
+  facet_grid(. ~ LAD, scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_continuous(limits = c(0, 1)) +  # Set the y-axis limits to 0 and 1
+  coord_flip() +
+  guides(fill = FALSE)  # Remove the legend
+
+# Display the combined plot
+print(plot_combined)
+
+
+
+ggsave('bottom3_decomposed_600.png' ,plot_combined, dpi = 300, width = 18, height = 10)
+```
+
+## 7.6. Proportional Contribution
+```{r give weights to each individual sub indicator}
+#
+lci_3 <- lci %>% select(-c(li_rank, li_score, li_exp, li_decile)) %>%
+  group_by(nb_clus) %>%
+  summarise(mean_d_c_score = mean(d_c_exp),
+            mean_d_edu_score = mean(d_edu_exp),
+            mean_d_enter_score = mean(d_enter_exp),
+            mean_d_l_score = mean(d_l_exp),
+            mean_d_h_score = mean(d_h_exp),
+            mean_p_c_score = mean(p_c_exp),
+            mean_p_edu_score = mean(p_edu_exp),
+            mean_p_enter_score = mean(p_enter_exp),
+            mean_p_l_score = mean(p_l_exp),
+            mean_p_h_score = mean(p_h_exp),
+            mean_den_score = mean(pop_density_exp))
+
+# average liverability score sums upto individual indicator scores
+# All indicator values are standardised and 1/11 is equal weights of individual indicators.
+# lci_per_borough$mean_li_score <- (lci_per_borough$mean_d_c_score/11) + (lci_per_borough$mean_d_edu_score/11) + (lci_per_borough$mean_d_enter_score/11) + (lci_per_borough$mean_d_l_score/11) + (lci_per_borough$mean_d_h_score/11) + (lci_per_borough$mean_p_c_score/11) + (lci_per_borough$mean_p_edu_score/11) + (lci_per_borough$mean_p_enter_score/11) + (lci_per_borough$mean_p_l_score/11) + (lci_per_borough$mean_p_h_score/11) + (lci_per_borough$mean_den_score/11)
+
+
+# multiply individual weights
+lci_3$mean_d_c_score <- lci_3$mean_d_c_score * 1/11
+lci_3$mean_d_edu_score <- lci_3$mean_d_edu_score * 1/11
+lci_3$mean_d_enter_score <- lci_3$mean_d_enter_score * 1/11
+lci_3$mean_d_l_score <- lci_3$mean_d_l_score * 1/11
+lci_3$mean_d_h_score <- lci_3$mean_d_h_score * 1/11
+lci_3$mean_den_score <- lci_3$mean_den_score * 1/11
+lci_3$mean_p_c_score <- lci_3$mean_p_c_score * 1/11
+lci_3$mean_p_edu_score <- lci_3$mean_p_edu_score * 1/11
+lci_3$mean_p_enter_score <- lci_3$mean_p_enter_score * 1/11
+lci_3$mean_p_l_score <- lci_3$mean_p_l_score * 1/11
+lci_3$mean_p_h_score <- lci_3$mean_p_h_score * 1/11
+```
+
+```{r data format to long pivot}
+# Define the legend names
+legend_names <- c("mean_d_c_score" = "Diversity of Commerce",
+                  "mean_d_edu_score" = "Diversity of Education",
+                  "mean_d_enter_score" = "Diversity of Entertainment",
+                  "mean_d_l_score" = "Diversity of Living",
+                  "mean_d_h_score" = "Diversity of Healthcare",
+                  "mean_p_c_score" = "Proximity to Commerce",
+                  "mean_p_edu_score" = "Proximity to Education",
+                  "mean_p_enter_score" = "Proximity to Entertainment",
+                  "mean_p_l_score" = "Proximity to Living",
+                  "mean_p_h_score" = "Proximity to Healthcare",
+                  "mean_den_score" = "Population Density")
+
+# Calculate the sum of indicators for each borough
+lci_3$sum_indicators <- rowSums(select(lci_3, starts_with("mean_")))
+
+
+# Reshape the data from wide to long format
+lci_long <- lci_3 %>%
+  pivot_longer(cols = starts_with("mean_"), names_to = "Indicator", values_to = "value")
+```
+
+```{r normalisation by dividing by the highest score per indicator}
+# Find the maximum score for each indicator - maximum score is 100/11 as the maximum score of exponentially transformed data is 100. And we divided by 11 to give each individual equal weights
+max_scores <- lci_long %>%
+  group_by(Indicator) %>%
+  summarise(max_score = max(value))
+
+# Calculate the proportion of each indicator score relative to the maximum score
+lci_long <- lci_long %>%
+  left_join(max_scores, by = "Indicator") %>%
+  mutate(proportion = value / max_score)
+
+# embed neighbourhood polygons
+nb_polygon <- nb_polygon %>% select(-LAD)
+
+# merge nb_polygon and lci_data
+lci_long_sf <- lci_long %>%
+  left_join(.,
+            nb_polygon,
+            by = 'nb_clus') %>% st_as_sf()
+
+# double check the class
+str(lci_long_sf)
+
+# proportion category
+lci_long_sf <- lci_long_sf %>%
+  mutate(prop_decile = cut(proportion, breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+                           labels = c("0.0 - 0.1", "0.1 - 0.2", "0.2 - 0.3", "0.3 - 0.4", "0.4 - 0.5",
+                                      "0.5 - 0.6", "0.6 - 0.7", "0.7 - 0.8", "0.8 - 0.9", "0.9 - 1.0"),
+                           include.lowest = TRUE))
+
+# Now the lci_long_sf dataframe has the 'prop_decile' column
+
+# Recode the Indicator column with custom names
+lci_long_sf <- lci_long_sf %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+file_path = 'C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/lci_long_sf_600.geojson'
+st_write(lci_long_sf, file_path, driver = 'GeoJSON')
+```
+
+
+```{r diversity}
+# filter diversity domain subindicators
+diversity_norm <- lci_long_sf %>%
+  filter(str_detect(`Indicator`, 'Diversity'))
+
+# Create the map plots
+# plot each map
+tm1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Commerce')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+ 
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Commerce')
+
+
+  
+tm2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Education')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Education')
+  
+  
+  
+tm3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Entertainment')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Entertainment')  
+
+  
+  
+tm4 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Living')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Living')
+
+  
+tm5 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Diversity of Healthcare')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Diversity of Healthcare')  
+
+# legend
+legend <- tm_shape(lci_long_sf) +
+  tm_polygons('prop_decile',
+              palette = 'viridis',
+              title = 'Proportion',
+              style = 'cat') +
+  tm_layout(legend.only = T,
+            legend.position = c('center', 'center'), 
+            legend.height = 15,
+            legend.width = 25,
+            asp = 0.1)
+
+
+t = tmap_arrange(tm1, tm2, tm3, tm4, tm5, legend, ncol=2)
+
+t
+
+tmap_save(t, 'diversity_normalised_600.png', height = 10, width = 8, dpi = 300)
+
+```
+
+
+
+
+```{r proximity}
+# filter proximity domain subindicators
+diversity_norm <- lci_long_sf %>%
+  filter(str_detect(`Indicator`, 'Proximity'))
+
+# Create the map plots
+# plot each map
+tm1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Commerce')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+ 
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Commerce')
+
+
+  
+tm2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Education')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Education')
+  
+  
+  
+tm3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Entertainment')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Entertainment')  
+
+  
+  
+tm4 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Living')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Living')
+
+  
+tm5 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_long_sf %>% filter(Indicator == 'Proximity to Healthcare')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) +
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Proximity to Healthcare')  
+
+# legend
+legend <- tm_shape(lci_long_sf) +
+  tm_polygons('prop_decile',
+              palette = 'viridis',
+              title = 'Proportion',
+              style = 'cat') +
+  tm_layout(legend.only = T,
+            legend.position = c('center', 'center'), 
+            legend.height = 15,
+            legend.width = 25,
+            asp = 0.1)
+
+
+t = tmap_arrange(tm1, tm2, tm3, tm4, tm5, legend, ncol=2)
+
+t
+
+tmap_save(t, 'proximity_normalised_600.png', height = 10, width = 8, dpi = 300)
+
+```
+
+```{r population density}
+# Create the map
+plot <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_long_sf %>% filter(Indicator == 'Population Density')) +
+  tm_polygons(col = 'prop_decile', 
+              palette = "viridis",
+              title = 'Proportion',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 1) + 
+  tm_scale_bar(text.size = 0.45, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            frame = TRUE,
+            panel.show = TRUE,
+            panel.labels = 'Population Density')
+
+
+plot
+tmap_save(plot, 'population_normalised_600.png', height = 6, width = 8, dpi = 300)
+```

@@ -1,0 +1,1278 @@
+---
+title: "proximity"
+output: html_document
+date: "2023-07-19"
+---
+
+# Packages
+```{r packages}
+# load packages
+library(data.table)
+library(doParallel)
+library(cppRouting)
+library(RcppParallel)
+library(sf)
+library(here)
+library(tmap)
+library(dplyr)
+library(tibble)
+library(sp)
+library(tidyverse)
+library(purrr)
+library(foreach) # for parallel computing
+library(profvis)
+library(concaveman)
+```
+
+
+```{r memory usage}
+gc()
+```
+
+
+# Isochrone - 500m
+```{r read in data}
+# read in data
+nb_entropy <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_500.geojson')) %>% select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 'GSS_CODE', 'entropy', 'size')) %>% st_transform(., 27700)
+
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+
+#amenities <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(27700)
+```
+
+
+## Proximity
+### Centroid of Neighbourhoods - Origin
+```{r}
+nb_centroids <- nb_polygon %>% st_centroid()
+
+#plot(nb_centroids, axes = TRUE)
+
+# save data
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/proximity/500m/origin_coords_500.geojson"
+
+st_write(nb_centroids, file_path, driver = 'GeoJSON')
+```
+
+### Creating polygons of each urban service - Destination
+```{r}
+# group by cluster, 15minute service and amenity
+diversity <- st_read(here::here('data', 'neighbourhood', 'diversity', '500m',
+                               'grouped_data_whole_500.geojson')) %>% st_transform(27700)
+
+# group by cluster, 15minute service and amenity
+diversity <- nb_entropy %>%
+  group_by(nb_clus, X15minute_6_urban_service, amenity) %>% 
+  summarise(counted = n())
+
+
+# filter urban service based on the number of points in the neighbourhoods
+diversity_1 <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(sum_count = sum(counted))
+
+# if there are more than 4 points, we create polygons and take the centroid as center of mass 
+diversity_poly <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(count = sum(counted)) %>%
+  filter(count >= 4)
+  
+
+# this does not satisfy 4 points to form a polygon - we need to use the mean coordinates
+diversity_centroid <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(count = sum(counted)) %>%
+  filter(count < 4)
+
+
+# Convert the Point geometries to a matrix of x-y coordinates
+#coordinates <- st_coordinates(nb_entropy$geometry)
+#coords <- matrix(coordinates[, c("X", "Y")], ncol = 2, byrow = TRUE)
+
+```
+
+## Center of mass
+### 1, 2, 3 points
+If there is only 1, 2 or 3 amenities in the neighbourhoods,
+these points cannot form polygons. That's why I calculated the center of mass separately.
+```{r center of mass for non-polygons}
+cm_1 <- diversity_centroid %>% 
+  filter(count == 1) %>% select(-count)
+
+cm_2 <- diversity_centroid %>%
+  filter(count == 2) %>% st_centroid(geometry) %>% select(-count)
+
+cm_3 <- diversity_centroid %>%
+  filter(count == 3) %>% st_centroid(geometry) %>% select(-count)
+```
+
+
+### center of mass from polygons
+If we take the centroids of polygons, we can get the center of mass. This can account for general distribution of amenities
+```{r}
+# create polygons out of multipoints
+polygons <- diversity_poly %>%
+  mutate(polygon = st_convex_hull(geometry)) %>% 
+  # take out the center of mass - centroid
+  mutate(centroid = st_centroid(polygon))
+
+# drop original geometry
+cm_4 <- polygons %>%
+  select(c(1,2,6)) %>% st_drop_geometry()
+
+# make it as a sf object, centroid as geometry
+cm_4 <- cm_4 %>%
+  st_as_sf()
+
+cm_4 <- cm_4 %>% st_set_geometry("centroid") %>% rename(geometry = centroid)
+  
+# rbind
+cm_list <- list(cm_1, cm_2, cm_3, cm_4)
+dest_coords <- do.call(rbind, cm_list) 
+dest_coords <- dest_coords %>%
+  group_by(nb_clus, X15minute_6_urban_service)
+  
+
+# destination points coordinates - coordinates indicate the center of mass for each urban service within neighbourhoods
+dest_coords <- dest_coords %>% arrange(nb_clus)
+
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/proximity/500m/dest_coords_500.geojson"
+
+st_write(dest_coords, file_path, driver = 'GeoJSON')
+  
+```
+All origin and destination points are in the same CRS:27700
+
+
+## Average Euclidean Distance calculation
+The average Euclidean distance is calculated here.
+Origin point is the centroid of neighbourhoods 
+Destination point is the center of mass for each urban service within the neighbourhoods.
+
+This approache captures the average distance from the neighborhood center to the urban service-related amenities as a whole.
+Whilst each neighbourhood consists of uber 3 hexagons, the distances from each hexagon within the neighborhood to the destination point will eventually average to the distance from the center of the neighborhood, it is reasonable to use the center of the neighborhood as a representative origin point for this calculation.
+
+By using center of mass as destination, we can effectively consider the overall distribution of urban services and take into account their collective proximity to the center of neighbourhoods.
+
+```{r proximity calculation}
+# Create an empty vector to store the distances
+distances <- vector("numeric", nrow(dest_coords))
+
+# Iterate over the rows of the destination data
+for (i in 1:nrow(dest_coords)) {
+  # Get the nb_clus value for the current destination point
+  nb_clus <- dest_coords$nb_clus[i]
+  
+  # Find the matching origin point based on nb_clus
+  origin <- nb_centroids[nb_centroids$nb_clus == nb_clus, ]
+  
+  # Calculate the Euclidean distance between the origin and destination points
+  distance <- st_distance(origin, dest_coords[i, ])
+  
+  # Store the distance in the vector
+  distances[i] <- distance
+}
+
+# Add the distances as a new column to the destination sf object
+# distance here indicates the distance between the centroid of neighbourhoods to
+# center of mass of urban services within neighbourhoods
+dest_coords$distance <- distances
+
+# max?
+max(dest_coords$distance) # 842.4193
+
+# min?
+min(dest_coords$distance) # 1.731 -06
+
+```
+
+
+```{r save data}
+# save data
+proximity <- dest_coords %>% st_drop_geometry()
+
+proximity_wide <- proximity %>%
+  pivot_wider(names_from = X15minute_6_urban_service, 
+              values_from = distance, names_prefix = "") %>%
+  rename(p_c = Commerce, p_l = Living, p_edu = Education,
+         p_enter = Entertainment, p_h = Healthcare)
+
+
+# As there are NA values, an additional column has been created. remove it
+proximity_wide <- proximity_wide %>% select(-Other)
+```
+
+
+## Network distance for missing values
+For those neighbourhoods which miss any of the five urban services, the network distance to the closest center of mass for that missing urban service in neighbouring neighbourhoods will be calculated.
+
+### Network constructing
+```{r}
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+
+# create unique edge identifier
+edges <- edges %>% dplyr::select(from, to, highway, length, geom) %>% dplyr::mutate(edgeID = c(1:n())) %>%
+  dplyr::select(edgeID, from, to, highway, length, geom)
+
+
+# create nodes at the start and end point of each edge
+# give each node a unique index
+nodes <- edges %>% 
+  st_coordinates() %>%
+  as_tibble() %>%
+  dplyr::rename(edgeID = L1) %>%
+  group_by(edgeID) %>%
+  slice(c(1,n())) %>%
+  ungroup() %>%
+  dplyr::mutate(start_end = rep(c('start', 'end'), times = n()/2)) %>%
+  dplyr::mutate(xy = paste(.$X, .$Y)) %>%
+  
+  # by using factor(), we can see many unique point geometry
+  # based on this, we give node indices
+  dplyr::mutate(nodeID = group_indices(., factor(xy, levels = unique(xy)))) %>%
+  dplyr::select(-xy)
+
+
+# start, end points for each edge
+# pull out start nodes
+start_nodes <- nodes %>% 
+  filter(start_end == 'start') %>%
+  pull(nodeID)
+
+# pull out end nodes
+end_nodes <- nodes %>%
+  filter(start_end == 'end') %>%
+  pull(nodeID)
+
+# plug in start/end nodes and reorder columns
+edges <- edges %>% select(-c(from, to)) %>%
+  mutate(from = start_nodes, to = end_nodes) %>%
+  select(from, to, highway, length, edgeID, geom)
+
+# remove end_nodes and start_nodes to save memory usage
+rm(end_nodes)
+rm(start_nodes)
+
+# remove duplicate nodes & set the same crs (EPSG:27700)
+nodes <- nodes %>% 
+  # keep unique node ID
+  distinct(nodeID, .keep_all = TRUE) %>%
+  dplyr::select(-c(edgeID, start_end)) 
+
+
+```
+
+
+```{r create network}
+# set the number of threads used by cppRouting
+RcppParallel::setThreadOptions(numThreads = 1)
+
+# prepare data to an appropriate format
+roads <- edges %>% select(from, to, length) %>% st_drop_geometry() %>% as.data.table()
+
+coord <- nodes %>% select(nodeID, X, Y) %>% as.data.table()
+
+# instantiate a graph with coordinates
+
+graph  <-  roads %>% 
+  makegraph(directed = F,
+            coords = coord)
+
+# remove edges and nodes to save memory
+rm(edges)
+rm(nodes)
+rm(coord)
+rm(roads)
+```
+
+
+```{r simplify graph}
+# remove non-intersection nodes, duplicated edges and isolated loops - simplify graph
+graph <- graph %>%
+  cppRouting::cpp_simplify(rm_loop = T,
+                           iterate = F)
+
+```
+
+
+```{r finding nearest node on the graph function}
+# this function finds the nearest nodes on the graph
+find_nearest_nodes_on_graph_sf <- function(point_data, graph, crs = 27700) {
+  
+  nodes_on_graph <- graph$coords %>% st_as_sf(., 
+                                              coords = c('X', 'Y'),
+                                              crs = 27700) 
+  
+  poi_data <- point_data %>% st_transform(27700)
+  
+  graph$coords[st_nearest_feature(poi_data, nodes_on_graph),'nodeID']
+  
+  
+}
+```
+
+### Network Distance
+### p_edu calculation using network distance
+The proximity to urban services of the neighbourhoods which miss any of five urban services will be measured between the center of neighbourhoods to the closest center of mass in other neighbourhoods
+```{r calculate distance for those neighbourhoods with missing education services}
+# P_edu - Education
+# pull out the nb_clus which has education services - they will be destination points 830 neighbourhoods
+edu_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_edu)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+edu_dest <- dest_coords %>% 
+  filter(nb_clus %in% edu_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Education') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have education 
+edu_nb_clus <- proximity_wide %>% filter(is.na(p_edu)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+edu_ori <- nb_centroids %>% 
+  filter(nb_clus %in% edu_nb_clus) %>% st_as_sf()
+
+```
+
+
+This projects the nodes on the graph and finds the closest corresponding nodes on the graph
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(edu_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(edu_dest, graph, crs = 27700)
+```
+
+
+```{r find geometries}
+# edu_origin_geometries <- lapply(nearest_nodes_origin, function(nodeIDs) {
+#   nodeIDs <- pull(nearest_nodes_origin)
+#   graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+#     st_as_sf(coords = c('X', 'Y'), crs = 27700)
+# })
+# edu_origin_geometries <- do.call(rbind, edu_origin_geometries)
+# gc()
+# 
+# edu_dest_geometries <- lapply(nearest_nodes_dest, function(nodeIDs) {
+#   nodeIDs <- pull(nearest_nodes_dest)
+#   graph$coords[graph$coords$nodeID %in% nodeIDs, ] %>%
+#     st_as_sf(coords = c('X', 'Y'), crs = 27700)
+# })
+# edu_dest_geometries <- do.call(rbind, edu_dest_geometries)
+# gc()
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel from each node
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+edu_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+edu_ori_1 <- edu_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# embed this distance value to original proximity_wide dataframe
+edu_ori_test <- edu_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  edu_ori_test,
+                  by = 'nb_clus')
+
+test$p_edu <- ifelse(is.na(test$p_edu), test$mindist, test$p_edu)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+```
+
+
+
+### p_l calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_l - Living
+# pull out the nb_clus which has living facilities - 1205 destinations
+living_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_l)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+living_dest <- dest_coords %>% 
+  filter(nb_clus %in% living_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Living') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have living facilities - 4 origin 
+living_nb_clus <- proximity_wide %>% filter(is.na(p_l)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+living_ori <- nb_centroids %>% 
+  filter(nb_clus %in% living_nb_clus) %>% st_as_sf()
+
+
+```
+
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(living_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(living_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+living_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+living_ori_1 <- living_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+living_ori_test <- living_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  living_ori_test,
+                  by = 'nb_clus')
+
+test$p_l <- ifelse(is.na(test$p_l), test$mindist, test$p_l)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_l))
+```
+
+
+
+### p_c calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_c - Commerce
+# pull out the nb_clus which has commerce - 933 facilities
+com_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_c)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+com_dest <- dest_coords %>% 
+  filter(nb_clus %in% com_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Commerce') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have commerce - 276 origin 
+com_nb_clus <- proximity_wide %>% filter(is.na(p_c)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+com_ori <- nb_centroids %>% 
+  filter(nb_clus %in% com_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_c)) # 276
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(com_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(com_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+com_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+com_ori_1 <- com_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+com_ori_test <- com_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  com_ori_test,
+                  by = 'nb_clus')
+
+test$p_c <- ifelse(is.na(test$p_c), test$mindist, test$p_c)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_c))
+```
+
+
+
+### p_enter calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_enter - Entertainment
+# pull out the nb_clus which has entertainment - 970
+enter_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_enter)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+enter_dest <- dest_coords %>% 
+  filter(nb_clus %in% enter_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have entertainment - 239
+enter_nb_clus <- proximity_wide %>% filter(is.na(p_enter)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+enter_ori <- nb_centroids %>% 
+  filter(nb_clus %in% enter_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_enter)) # 239
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(enter_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(enter_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining enter_ori nb_clus to nodeID
+enter_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+enter_ori_1 <- enter_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+enter_ori_test <- enter_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  enter_ori_test,
+                  by = 'nb_clus')
+
+test$p_enter <- ifelse(is.na(test$p_enter), test$mindist, test$p_enter)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_enter))
+```
+
+
+
+### p_h calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_h - Healthcare
+# pull out the nb_clus which has health - 748
+health_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_h)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+health_dest <- dest_coords %>% 
+  filter(nb_clus %in% health_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have health - 461
+health_nb_clus <- proximity_wide %>% filter(is.na(p_h)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+health_ori <- nb_centroids %>% 
+  filter(nb_clus %in% health_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_h)) # 461
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(health_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(health_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining enter_ori nb_clus to nodeID
+health_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+health_ori_1 <- health_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# embed this distance value to original proximity_wide dataframe
+health_ori_test <- health_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  health_ori_test,
+                  by = 'nb_clus')
+
+test$p_h <- ifelse(is.na(test$p_h), test$mindist, test$p_h)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_h))
+
+max(proximity_wide$p_edu) # 5568
+max(proximity_wide$p_c) # 5309
+max(proximity_wide$p_l) # 1113
+max(proximity_wide$p_enter) # 4330
+max(proximity_wide$p_h) # 5754
+```
+
+
+
+```{r data save}
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/proximity/500m/proximity_500.csv"
+
+write.csv(proximity_wide, file_path, row.names = FALSE)
+```
+
+# Isochrone - 600m
+```{r read in data}
+# read in data
+nb_entropy <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_600.geojson')) %>% select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 'GSS_CODE', 'entropy', 'size')) %>% st_transform(., 27700)
+
+nb_polygon <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_600.geojson')) %>% st_transform(27700)
+
+#amenities <- st_read(here::here('data', 'pois', 'pois_london.geojson')) %>% st_transform(27700)
+```
+
+
+## Proximity
+### Centroid of Neighbourhoods - Origin
+```{r}
+nb_centroids <- nb_polygon %>% st_centroid()
+
+#plot(nb_centroids, axes = TRUE)
+
+# save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/proximity/600m/origin_coords_600.geojson"
+# 
+# st_write(nb_centroids, file_path, driver = 'GeoJSON')
+```
+
+### Creating polygons of each urban service - Destination
+```{r}
+# group by cluster, 15minute service and amenity
+diversity <- nb_entropy %>%
+  group_by(nb_clus, X15minute_6_urban_service, amenity) %>% 
+  summarise(counted = n())
+
+
+# filter urban service based on the number of points in the neighbourhoods
+diversity_1 <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(sum_count = sum(counted))
+
+# if there are more than 4 points, we create polygons and take the centroid as center of mass 
+diversity_poly <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(count = sum(counted)) %>%
+  filter(count >= 4)
+  
+
+# this does not satisfy 4 points to form a polygon - we need to use the mean coordinates
+diversity_centroid <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(count = sum(counted)) %>%
+  filter(count < 4)
+
+
+
+```
+
+## Center of mass
+### 1, 2, 3 points
+If there is only 1, 2 or 3 amenities in the neighbourhoods,
+these points cannot form polygons. That's why I calculated the center of mass separately.
+```{r center of mass for non-polygons}
+cm_1 <- diversity_centroid %>% 
+  filter(count == 1) %>% select(-count)
+
+cm_2 <- diversity_centroid %>%
+  filter(count == 2) %>% st_centroid(geometry) %>% select(-count)
+
+cm_3 <- diversity_centroid %>%
+  filter(count == 3) %>% st_centroid(geometry) %>% select(-count)
+```
+
+
+### center of mass from polygons
+If we take the centroids of polygons, we can get the center of mass. This can account for general distribution of amenities
+```{r}
+# create polygons out of multipoints
+polygons <- diversity_poly %>%
+  mutate(polygon = st_convex_hull(geometry)) %>% 
+  # take out the center of mass - centroid
+  mutate(centroid = st_centroid(polygon))
+
+# drop original geometry
+cm_4 <- polygons %>%
+  select(c(1,2,6)) %>% st_drop_geometry()
+
+# make it as a sf object, centroid as geometry
+cm_4 <- cm_4 %>%
+  st_as_sf()
+
+cm_4 <- cm_4 %>% st_set_geometry("centroid") %>% rename(geometry = centroid)
+  
+# rbind
+cm_list <- list(cm_1, cm_2, cm_3, cm_4)
+dest_coords <- do.call(rbind, cm_list) 
+dest_coords <- dest_coords %>%
+  group_by(nb_clus, X15minute_6_urban_service)
+  
+
+# destination points coordinates - coordinates indicate the center of mass for each urban service within neighbourhoods
+dest_coords <- dest_coords %>% arrange(nb_clus)
+  
+# save data
+# file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/proximity/600m/dest_coords_600.geojson"
+ 
+# st_write(dest_coords, file_path, driver = 'GeoJSON')
+```
+All origin and destination points are in the same CRS:27700
+
+
+## Average Euclidean Distance calculation
+The average Euclidean distance is calculated here.
+Origin point is the centroid of neighbourhoods 
+Destination point is the center of mass for each urban service within the neighbourhoods.
+
+This approache captures the average distance from the neighborhood center to the urban service-related amenities as a whole.
+Whilst each neighbourhood consists of uber 3 hexagons, the distances from each hexagon within the neighborhood to the destination point will eventually average to the distance from the center of the neighborhood, it is reasonable to use the center of the neighborhood as a representative origin point for this calculation.
+
+By using center of mass as destination, we can effectively consider the overall distribution of urban services and take into account their collective proximity to the center of neighbourhoods.
+
+```{r proximity calculation}
+# Create an empty vector to store the distances
+distances <- vector("numeric", nrow(dest_coords))
+
+# Iterate over the rows of the destination data
+for (i in 1:nrow(dest_coords)) {
+  # Get the nb_clus value for the current destination point
+  nb_clus <- dest_coords$nb_clus[i]
+  
+  # Find the matching origin point based on nb_clus
+  origin <- nb_centroids[nb_centroids$nb_clus == nb_clus, ]
+  
+  # Calculate the Euclidean distance between the origin and destination points
+  distance <- st_distance(origin, dest_coords[i, ])
+  
+  # Store the distance in the vector
+  distances[i] <- distance
+}
+
+# Add the distances as a new column to the destination sf object
+# distance here indicates the distance between the centroid of neighbourhoods to
+# center of mass of urban services within neighbourhoods
+dest_coords$distance <- distances
+
+# max?
+max(dest_coords$distance) # 975
+
+# min?
+min(dest_coords$distance) # 4.10 -06
+
+```
+
+
+```{r save data}
+# save data
+proximity <- dest_coords %>% st_drop_geometry()
+
+proximity_wide <- proximity %>%
+  pivot_wider(names_from = X15minute_6_urban_service, 
+              values_from = distance, names_prefix = "") %>%
+  rename(p_c = Commerce, p_l = Living, p_edu = Education,
+         p_enter = Entertainment, p_h = Healthcare)
+
+
+# As there are NA values, an additional column has been created. remove it
+proximity_wide <- proximity_wide %>% select(-Other)
+```
+
+
+## Network distance for missing values
+For those neighbourhoods which miss any of the five urban services, the network distance to the closest center of mass for that missing urban service in neighbouring neighbourhoods will be calculated.
+
+### Network constructing
+```{r}
+edges <- st_read(here::here('data', 'london_all.gpkg'), layer = "edges") %>% st_transform(., 27700)
+
+# create unique edge identifier
+edges <- edges %>% dplyr::select(from, to, highway, length, geom) %>% dplyr::mutate(edgeID = c(1:n())) %>%
+  dplyr::select(edgeID, from, to, highway, length, geom)
+
+
+# create nodes at the start and end point of each edge
+# give each node a unique index
+nodes <- edges %>% 
+  st_coordinates() %>%
+  as_tibble() %>%
+  dplyr::rename(edgeID = L1) %>%
+  group_by(edgeID) %>%
+  slice(c(1,n())) %>%
+  ungroup() %>%
+  dplyr::mutate(start_end = rep(c('start', 'end'), times = n()/2)) %>%
+  dplyr::mutate(xy = paste(.$X, .$Y)) %>%
+  
+  # by using factor(), we can see many unique point geometry
+  # based on this, we give node indices
+  dplyr::mutate(nodeID = group_indices(., factor(xy, levels = unique(xy)))) %>%
+  dplyr::select(-xy)
+
+
+# start, end points for each edge
+# pull out start nodes
+start_nodes <- nodes %>% 
+  filter(start_end == 'start') %>%
+  pull(nodeID)
+
+# pull out end nodes
+end_nodes <- nodes %>%
+  filter(start_end == 'end') %>%
+  pull(nodeID)
+
+# plug in start/end nodes and reorder columns
+edges <- edges %>% select(-c(from, to)) %>%
+  mutate(from = start_nodes, to = end_nodes) %>%
+  select(from, to, highway, length, edgeID, geom)
+
+# remove end_nodes and start_nodes to save memory usage
+rm(end_nodes)
+rm(start_nodes)
+
+# remove duplicate nodes & set the same crs (EPSG:27700)
+nodes <- nodes %>% 
+  # keep unique node ID
+  distinct(nodeID, .keep_all = TRUE) %>%
+  dplyr::select(-c(edgeID, start_end)) 
+
+
+```
+
+
+```{r create network}
+# set the number of threads used by cppRouting
+RcppParallel::setThreadOptions(numThreads = 1)
+
+# prepare data to an appropriate format
+roads <- edges %>% select(from, to, length) %>% st_drop_geometry() %>% as.data.table()
+
+coord <- nodes %>% select(nodeID, X, Y) %>% as.data.table()
+
+# instantiate a graph with coordinates
+
+graph  <-  roads %>% 
+  makegraph(directed = F,
+            coords = coord)
+
+# remove edges and nodes to save memory
+rm(edges)
+rm(nodes)
+rm(coord)
+rm(roads)
+```
+
+
+```{r simplify graph}
+# remove non-intersection nodes, duplicated edges and isolated loops - simplify graph
+graph <- graph %>%
+  cppRouting::cpp_simplify(rm_loop = T,
+                           iterate = F)
+
+```
+
+
+```{r finding nearest node on the graph function}
+# this function finds the nearest nodes on the graph
+find_nearest_nodes_on_graph_sf <- function(point_data, graph, crs = 27700) {
+  
+  nodes_on_graph <- graph$coords %>% st_as_sf(., 
+                                              coords = c('X', 'Y'),
+                                              crs = 27700) 
+  
+  poi_data <- point_data %>% st_transform(27700)
+  
+  graph$coords[st_nearest_feature(poi_data, nodes_on_graph),'nodeID']
+  
+  
+}
+```
+
+### Network Distance
+nb_clus: the coordinates of 23484 and 24320 are projected to the same node on the graph due to their adjacency. Keep in mind. Not to double count.
+
+### p_edu calculation using network distance
+There are 864 neighbourhoods with 600m of isodistance
+The proximity to urban services of the neighbourhoods which miss any of five urban services will be measured between the center of neighbourhoods to the closest center of mass in other neighbourhoods
+```{r calculate distance for those neighbourhoods with missing education services}
+# P_edu - Education
+# pull out the nb_clus which has education services - they will be destination points 652 neighbourhoods
+edu_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_edu)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+edu_dest <- dest_coords %>% 
+  filter(nb_clus %in% edu_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Education') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have education 
+edu_nb_clus <- proximity_wide %>% filter(is.na(p_edu)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values - 212 neighbourhoods
+edu_ori <- nb_centroids %>% 
+  filter(nb_clus %in% edu_nb_clus) %>% st_as_sf()
+
+
+sum(is.na(proximity_wide$p_edu)) # 212
+```
+
+
+This projects the nodes on the graph and finds the closest corresponding nodes on the graph
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(edu_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(edu_dest, graph, crs = 27700)
+```
+
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel from each node
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+edu_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+
+
+
+# some nb_clus coords are projected to the same nodes on the graph
+# Group by nodeID and count unique nb_clus values
+nodeID_counts <- edu_ori %>%
+  group_by(nodeID) %>%
+  summarise(unique_nb_clus = n_distinct(nb_clus))
+
+# Filter for groups with more than one unique nb_clus value
+duplicate_nodeID <- nodeID_counts %>%
+  filter(unique_nb_clus > 1) %>% pull(nodeID)
+
+unique_nodeID <- nodeID_counts %>%
+  filter(unique_nb_clus == 1) %>% pull(nodeID)
+
+filtered_edu_ori <- edu_ori %>%
+  filter(nodeID %in% unique_nodeID)
+
+duplicated_edu_ori <- edu_ori %>% 
+  filter(nodeID %in% duplicate_nodeID)
+
+
+# first get the distance values of unique nb_clus
+edu_ori_1 <- filtered_edu_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+# get the distance values for duplicated nb_clus
+edu_ori_2 <- duplicated_edu_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node'))
+first_row <- edu_ori_2[1,]
+second_row <- edu_ori_2[3,]
+
+
+education <- rbind(edu_ori_1, first_row,second_row)
+
+
+
+
+# embed this distance value to original proximity_wide dataframe
+edu_ori_test <- education %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  edu_ori_test,
+                  by = 'nb_clus')
+
+test$p_edu <- ifelse(is.na(test$p_edu), test$mindist, test$p_edu)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+```
+
+
+
+### p_l calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_l - Living
+# pull out the nb_clus which has living -863 neighbourhoods
+living_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_l)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+living_dest <- dest_coords %>% 
+  filter(nb_clus %in% living_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Living') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have living - 1 neighbourhood
+living_nb_clus <- proximity_wide %>% filter(is.na(p_l)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+living_ori <- nb_centroids %>% 
+  filter(nb_clus %in% living_nb_clus) %>% st_as_sf()
+```
+
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(living_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(living_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+living_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+living_ori_1 <- living_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+living_ori_test <- living_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  living_ori_test,
+                  by = 'nb_clus')
+
+test$p_l <- ifelse(is.na(test$p_l), test$mindist, test$p_l)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_l))
+```
+
+
+
+### p_c calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_c - Commerce
+# pull out the nb_clus which has commerce - 688 neighbourhoods
+com_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_c)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+com_dest <- dest_coords %>% 
+  filter(nb_clus %in% com_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Commerce') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have commerce - 176 neighbourhoods
+com_nb_clus <- proximity_wide %>% filter(is.na(p_c)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+com_ori <- nb_centroids %>% 
+  filter(nb_clus %in% com_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_c)) # 522
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(com_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(com_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+com_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+com_ori_1 <- com_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+com_ori_test <- com_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  com_ori_test,
+                  by = 'nb_clus')
+
+test$p_c <- ifelse(is.na(test$p_c), test$mindist, test$p_c)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_c))
+```
+
+
+
+### p_enter calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_enter - Entertainment
+# pull out the nb_clus which has entertainment - 728 neighbourhoods
+enter_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_enter)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+enter_dest <- dest_coords %>% 
+  filter(nb_clus %in% enter_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have entertainment - 136 neighbourhoods
+enter_nb_clus <- proximity_wide %>% filter(is.na(p_enter)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+enter_ori <- nb_centroids %>% 
+  filter(nb_clus %in% enter_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_enter)) # 136
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(enter_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(enter_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining enter_ori nb_clus to nodeID
+enter_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+enter_ori_1 <- enter_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+enter_ori_test <- enter_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  enter_ori_test,
+                  by = 'nb_clus')
+
+test$p_enter <- ifelse(is.na(test$p_enter), test$mindist, test$p_enter)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_enter))
+```
+
+
+
+### p_h calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_h - Healthcare
+# pull out the nb_clus which has healthcare 593 neighbourhoods
+health_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_h)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+health_dest <- dest_coords %>% 
+  filter(nb_clus %in% health_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have healthcare - 271 neighbourhoods
+health_nb_clus <- proximity_wide %>% filter(is.na(p_h)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+health_ori <- nb_centroids %>% 
+  filter(nb_clus %in% health_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_h)) # 271
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(health_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(health_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining enter_ori nb_clus to nodeID
+health_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+
+# some nb_clus coords are projected to the same nodes on the graph
+# Group by nodeID and count unique nb_clus values
+nodeID_counts <- health_ori %>%
+  group_by(nodeID) %>%
+  summarise(unique_nb_clus = n_distinct(nb_clus))
+
+# Filter for groups with more than one unique nb_clus value
+duplicate_nodeID <- nodeID_counts %>%
+  filter(unique_nb_clus > 1) %>% pull(nodeID)
+
+unique_nodeID <- nodeID_counts %>%
+  filter(unique_nb_clus == 1) %>% pull(nodeID)
+
+filtered_health_ori <- health_ori %>%
+  filter(nodeID %in% unique_nodeID)
+
+duplicated_health_ori <- health_ori %>% 
+  filter(nodeID %in% duplicate_nodeID)
+
+
+# first get the distance values of unique nb_clus
+health_ori_1 <- filtered_health_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+# get the distance values for duplicated nb_clus
+health_ori_2 <- duplicated_health_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node'))
+first_row <- health_ori_2[1,]
+second_row <- health_ori_2[3,]
+
+
+healthcare <- rbind(health_ori_1, first_row, second_row)
+
+
+
+# embed this distance value to original proximity_wide dataframe
+health_ori_test <- healthcare %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  health_ori_test,
+                  by = 'nb_clus')
+
+test$p_h <- ifelse(is.na(test$p_h), test$mindist, test$p_h)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_h))
+
+max(proximity_wide$p_edu) # 5660
+max(proximity_wide$p_c) # 4912
+max(proximity_wide$p_l) # 1118.14
+max(proximity_wide$p_enter) # 4330
+max(proximity_wide$p_h) # 5695
+```
+
+
+
+```{r data save}
+file_path = "C:/Users/phily/Desktop/UCL/Term 2/UCL Dissertation/Dissertation_R/data/neighbourhood/proximity/600m/proximity_600.csv"
+
+
+st_write(proximity_wide, file_path, row.names = FALSE)
+```

@@ -1,0 +1,285 @@
+---
+title: "population"
+output: html_document
+date: "2023-07-21"
+---
+
+# Packages
+```{r packages}
+library(sf)
+library(tidyverse)
+library(dplyr)
+library(here)
+library(doParallel)
+library(foreach)
+library(stplanr)
+# performance monitoring
+library(profvis)
+library(concaveman)
+library(data.table)
+# map
+library(tmap)
+library(units)
+```
+
+```{r}
+gc()
+```
+
+
+# Cluster size
+```{r read in data}
+# read in data
+poly_100 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_100.geojson')) %>% st_transform(27700)
+
+poly_200 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_200.geojson')) %>% st_transform(27700)
+
+poly_400 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_400.geojson')) %>% st_transform(27700)
+
+poly_500 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_500.geojson')) %>% st_transform(27700)
+
+poly_600 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_600.geojson')) %>% st_transform(27700)
+
+poly_700 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_700.geojson')) %>% st_transform(27700)
+
+poly_800 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_800.geojson')) %>% st_transform(27700)
+
+poly_1200 <- st_read(here::here('data', 'neighbourhood', 'whole_neighbourhoods_polygon_1200.geojson')) %>% st_transform(27700)
+
+class(poly_100)
+
+
+# London borough data
+london <- st_read(here::here('data', 'boundary', 'London_Borough_Excluding_MHW.shp')) %>% st_transform(27700)
+```
+
+
+```{r area size}
+poly_100 <- poly_100 %>% mutate(area = st_area(.))
+
+poly_200 <- poly_200 %>% mutate(area = st_area(.))
+
+poly_400 <- poly_400 %>% mutate(area = st_area(.))
+
+poly_500 <- poly_500 %>% mutate(area = st_area(.))
+
+poly_600 <- poly_600 %>% mutate(area = st_area(.))
+
+poly_700 <- poly_700 %>% mutate(area = st_area(.))
+
+poly_800 <- poly_800 %>% mutate(area = st_area(.))
+
+poly_1200 <- poly_1200 %>% mutate(area = st_area(.))
+
+london <- london %>% mutate(area = st_area(.))
+```
+
+
+## Largest Component Size
+```{r max area size}
+# max size
+poly_100_size_max <- max(poly_100$area)
+poly_200_size_max <- max(poly_200$area)
+poly_400_size_max <- max(poly_400$area)
+poly_500_size_max <- max(poly_500$area)
+poly_600_size_max <- max(poly_600$area)
+poly_700_size_max <- max(poly_700$area)
+poly_800_size_max <- max(poly_800$area)
+poly_1200_size_max <- max(poly_1200$area)
+```
+
+
+
+
+```{r plot}
+# this plot will help define neighbourhood threshold
+data <- data.frame(x = c(100, 200, 400, 500, 600, 700, 800, 1200),
+                   y = c(poly_100_size_max, poly_200_size_max, poly_400_size_max, poly_500_size_max, poly_600_size_max, poly_700_size_max, poly_800_size_max, poly_1200_size_max))
+
+# Convert y values to a unit object (e.g., square meters)
+data$y <- set_units(data$y, "m^2")
+
+# Create the scatter plot with ggplot2
+plot_object <- ggplot(data, aes(x = x, y = y)) +
+  geom_point(size = 3, color = "blue", alpha = 0.6) +  # Decrease alpha for points
+  geom_line(color = "red", alpha = 0.6) +              # Decrease alpha for lines
+  labs(x = "Isodistance Size", y = "The Largest Component Size", title = "Variation In The Largest Component Size with Isodistance Changes") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    panel.background = element_rect(fill = "white"),  # Set panel background to white
+    plot.background = element_rect(fill = "white"),   # Set plot background to white
+    text = element_text(color = "black"),             # Set text color to black
+    axis.line = element_line(color = "black")         # Set axis line color to black
+  ) +
+  scale_x_continuous(breaks = c(100, 200, 400, 500, 600, 700, 800, 1200))
+
+
+# Save the plot
+ggsave('largest_component.png', plot_object, height = 8, width = 8, dpi = 300)
+
+
+plot_object
+```
+We can see that as isodistance increases the largest neighbourhood area size increases as well. In particular, the largest neighbourhood area size increases dramatically after 600m of isodistance.
+Natural/artificial geographical features (The Thames and Hyde park) can influence the shape and and size of neighbourhoods. However, after 600m of isodistance, some geographical features no longer play a limiting role, allowing amenities agglomerate and neighbourhoods grow extensively. Provided that residents' travel journey are often influenced by geographical features, 500-600m threshold seems reasonable.
+
+The size of the largest component can shed light on defining neighbourhood thresholds.
+
+## Normalised Largest Component Size
+```{r}
+# london area size
+london_size <- sum(london$area)
+
+# normalised size
+poly_100_norm_size <- drop_units(max(poly_100$area)/london_size)
+poly_200_norm_size <- drop_units(max(poly_200$area)/london_size)
+poly_400_norm_size <- drop_units(max(poly_400$area)/london_size)
+poly_500_norm_size <- drop_units(max(poly_500$area)/london_size)
+poly_600_norm_size <- drop_units(max(poly_600$area)/london_size)
+poly_700_norm_size <- drop_units(max(poly_700$area)/london_size)
+poly_800_norm_size <- drop_units(max(poly_800$area)/london_size)
+poly_1200_norm_size <- drop_units(max(poly_1200$area)/london_size)
+```
+
+```{r}
+# this plot will help define neighbourhood threshold
+data <- data.frame(x = c(100, 200, 400, 500, 600, 700, 800, 1200),
+                   y = c(poly_100_norm_size, poly_200_norm_size, poly_400_norm_size, poly_500_norm_size, poly_600_norm_size, poly_700_norm_size, poly_800_norm_size, poly_1200_norm_size))
+
+plot_object_1 <- ggplot(data, aes(x = x, y = y)) +
+  geom_point(size = 3, color = "blue", alpha = 0.6) +  # Decrease alpha for points
+  geom_line(color = "red", alpha = 0.6) +              # Decrease alpha for lines
+  labs(x = "Isodistance Size", y = "The Normalised Largest Component Size", title = "Variation In The Normalised Largest Component Size with Isodistance Changes") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    panel.background = element_rect(fill = "white"),  # Set panel background to white
+    plot.background = element_rect(fill = "white"),   # Set plot background to white
+    text = element_text(color = "black"),             # Set text color to black
+    axis.line = element_line(color = "black")         # Set axis line color to black
+  ) +
+  scale_x_continuous(breaks = c(100, 200, 400, 500, 600, 700, 800, 1200))
+
+# Save the plot
+ggsave('norm_largest_component.png', plot_object_1, height = 8, width = 8, dpi = 300)
+
+plot_object_1
+```
+
+
+
+As amenities agglomerate, each neighbourhood size becomes big. Thus, the normalised largest component becomes smaller than that of 800m of isodistance as the sum of areas becomes really big.
+
+
+
+
+
+
+## Spatial Distribution
+```{r poly 100}
+# Create the histogram
+ggplot(poly_100, aes(x = area)) +
+  geom_histogram(binwidth = 1000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+```{r poly 200}
+# Create the histogram
+ggplot(poly_200, aes(x = area)) +
+  geom_histogram(binwidth = 5000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+
+```{r poly 400}
+# Create the histogram
+ggplot(poly_400, aes(x = area)) +
+  geom_histogram(binwidth = 20000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(poly_500, aes(x = area)) +
+  geom_histogram(binwidth = 50000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+
+
+
+
+```{r}
+# Create the histogram
+ggplot(poly_600, aes(x = area)) +
+  geom_histogram(binwidth = 60000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+```{r}
+# Create the histogram
+ggplot(poly_700, aes(x = area)) +
+  geom_histogram(binwidth = 10000000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+```{r}
+# Create the histogram
+ggplot(poly_800, aes(x = area)) +
+  geom_histogram(binwidth = 10000000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+```{r}
+# Create the histogram
+ggplot(poly_1200, aes(x = area)) +
+  geom_histogram(binwidth = 10000000, fill = "blue", color = "white") +
+  labs(x = "Neighbourhood Area Size (sq. meters)", y = "Frequency", title = "Distribution of Neighbourhood Area Size") +
+  theme_minimal()
+```
+Many values are highly skewed
+
+## Average Component Size
+```{r average area size}
+# max size
+poly_100_size_avg <- exp(median(log(poly_100$area)))
+poly_200_size_avg <- exp(median(log(poly_200$area)))
+poly_400_size_avg <- exp(median(log(poly_400$area)))
+poly_500_size_avg <- exp(median(log(poly_500$area)))
+poly_600_size_avg <- exp(median(log(poly_600$area)))
+poly_700_size_avg <- exp(median(log(poly_700$area)))
+poly_800_size_avg <- exp(median(log(poly_800$area)))
+poly_1200_size_avg <- exp(median(log(poly_1200$area)))
+```
+
+```{r}
+data <- data.frame(x = c(100, 200, 400, 500, 600, 700, 800, 1200),
+                   y = c(poly_100_size_avg, poly_200_size_avg, poly_400_size_avg, poly_500_size_avg, poly_600_size_avg, poly_700_size_avg, poly_800_size_avg, poly_1200_size_avg))
+
+# Create the scatter plot
+plot_object_2 <- ggplot(data, aes(x = x, y = y)) +
+  geom_point(size = 3, color = "blue") +
+  geom_line() +
+  labs(x = "Isodistance Size", y = "The Average Neighbourhood Size", title = "Variation In The Average Neighbourhood Size with Isodistance Changes") +
+  theme_minimal() +
+  scale_x_continuous(breaks = c(100, 200, 400, 500, 600, 700, 800, 1200))
+
+plot_object_2
+```
+This is somewhat evident. As isodistance increases, the agglomeration of amenities gets bigger so the average size of neighbourhood cluster also increases.
+
+
+## Wilkinson test
+```{r}
+area_400 <- as.numeric(poly_400$area)
+area_500 <- as.numeric(poly_500$area)
+area_600 <- as.numeric(poly_600$area)
+
+# Perform the Mann-Whitney U test (Wilcoxon rank-sum test)
+result <- wilcox.test(area_500, area_600)
+print(result)
+
+```
